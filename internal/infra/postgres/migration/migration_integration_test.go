@@ -4,6 +4,8 @@ package migration_test
 
 import (
 	"context"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -13,7 +15,7 @@ import (
 	"github.com/Free-sp1rit/content-platform/internal/testkit"
 )
 
-func TestEmptyMigrationDirectoryIntegration(t *testing.T) {
+func TestBaselineMigrationIntegration(t *testing.T) {
 	db, err := postgres.Open(context.Background(), config.DatabaseConfig{
 		URL:             testkit.DatabaseURL(t),
 		MaxOpenConns:    5,
@@ -26,7 +28,11 @@ func TestEmptyMigrationDirectoryIntegration(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	directory := t.TempDir()
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller() could not locate integration test")
+	}
+	directory := filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "..", "..", "..", "..", "migrations"))
 	if err := migration.Run(context.Background(), db, directory, "up"); err != nil {
 		t.Fatalf("migration up error = %v", err)
 	}
