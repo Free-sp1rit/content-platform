@@ -397,6 +397,7 @@ const (
     Unauthenticated       Kind = "unauthenticated"
     PermissionDenied      Kind = "permission_denied"
     NotFound              Kind = "not_found"
+    MethodNotAllowed      Kind = "method_not_allowed"
     Conflict              Kind = "conflict"
     RateLimited           Kind = "rate_limited"
     Internal              Kind = "internal_error"

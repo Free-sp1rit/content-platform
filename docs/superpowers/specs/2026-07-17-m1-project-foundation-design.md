@@ -319,6 +319,7 @@ Request ID 规则：
 | `unauthenticated` | 401 |
 | `permission_denied` | 403 |
 | `not_found` | 404 |
+| `method_not_allowed` | 405 |
 | `conflict` | 409 |
 | `rate_limited` | 429 |
 | `internal_error` | 500 |
