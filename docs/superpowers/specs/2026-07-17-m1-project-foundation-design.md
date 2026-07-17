@@ -1,6 +1,6 @@
 # M1 基础工程骨架设计
 
-- 状态：已确认，待书面复核
+- 状态：已确认，待实现
 - 日期：2026-07-17
 - 分支：`feat/project-foundation`
 - Go Module：`github.com/Free-sp1rit/content-platform`
@@ -248,8 +248,10 @@ LOG_FORMAT=json
 请求中间件顺序为：
 
 ```text
-Request ID -> Recovery -> Access Log -> ServeMux
+Request ID -> Access Log -> Recovery -> ServeMux
 ```
+
+Access Log 位于 Recovery 外层，使 panic 被转换成 `500` 后再记录最终状态码；Request ID 位于最外层，保证 recovery 日志和错误响应都能取得同一个标识。
 
 请求完成日志包含：
 
