@@ -246,7 +246,7 @@ LOG_FORMAT=json
 
 日志使用标准库 `log/slog`。本地允许 text 输出，类生产环境默认 JSON。基础字段至少包含 `service` 和 `environment`。
 
-Go-redis 的内部 logger 在应用组装时适配到同一个 `slog.Logger`，避免 Redis 重试信息绕过结构化日志输出到标准库默认 logger。
+Go-redis 的内部 logger 在应用组装时适配到同一个 `slog.Logger`，goose 的内部 logger 在 migration 命令中使用同样的适配方式，避免第三方运行日志绕过结构化日志输出到标准库默认 logger。
 
 请求中间件顺序为：
 
@@ -430,7 +430,7 @@ M1 只直接引入实际使用的固定版本：
 | `github.com/caarlos0/env/v11` | `v11.4.1` |
 | `github.com/stretchr/testify` | `v1.11.1`，仅在测试实际使用时 |
 
-JWT、crypto、validator、sync 和 redismock 在对应功能真正使用时引入。每次依赖变化后执行 `go mod tidy` 与 `go mod verify`，不保留未使用的 direct dependency。
+JWT、crypto、validator、sync 和 redismock 在对应功能真正使用时才声明为 direct dependency。Goose 已间接引入 `golang.org/x/sync`，module graph 将其固定到需求指定的 `v0.21.0`。每次依赖变化后执行 `go mod tidy` 与 `go mod verify`，不保留未使用的 direct dependency。
 
 ## 14. 开发命令
 

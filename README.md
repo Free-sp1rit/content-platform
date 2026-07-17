@@ -11,6 +11,7 @@
 - Redis：`github.com/redis/go-redis/v9 v9.21.0`
 - Migration：`github.com/pressly/goose/v3 v3.27.1`
 - 配置：`github.com/caarlos0/env/v11 v11.4.1`
+- 并发辅助（间接版本约束）：`golang.org/x/sync v0.21.0`
 - 日志：标准库 `log/slog`
 
 Go module：
@@ -139,7 +140,7 @@ Readiness 响应只暴露依赖的 `up/down`，不会返回 DSN、Redis 地址�
 - 已知路径上的错误方法返回 JSON `405 method_not_allowed` 和 `Allow` header。
 - panic 会被恢复，客户端收到通用 JSON `500`，服务端日志包含 request ID 和 stack trace。
 - 访问日志使用 `RemoteAddr`，M1 不信任未经配置的 `X-Forwarded-For`。
-- Go-redis 内部重试日志通过 `slog` 输出，不会混入标准库默认的非结构化日志。
+- Go-redis 和 goose 的内部运行日志通过 `slog` 输出，不会混入标准库默认的非结构化日志。
 
 ## 测试
 

@@ -46,6 +46,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) (code int
 		_, _ = fmt.Fprintf(stderr, "initialize logging: %v\n", err)
 		return 1
 	}
+	migration.ConfigureLogger(logger)
 
 	db, err := postgres.Open(ctx, cfg.Database)
 	if err != nil {
