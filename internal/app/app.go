@@ -35,6 +35,7 @@ type startupDependencies struct {
 }
 
 func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, error) {
+	redisinfra.ConfigureLogger(logger)
 	return newWithDependencies(ctx, cfg, logger, startupDependencies{
 		openPostgres: postgres.Open,
 		newRedis:     redisinfra.New,
