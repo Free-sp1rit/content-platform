@@ -1,6 +1,6 @@
 # M1 基础工程骨架设计
 
-- 状态：已确认，待实现
+- 状态：已实现并验证
 - 日期：2026-07-17
 - 分支：`feat/project-foundation`
 - Go Module：`github.com/Free-sp1rit/content-platform`
@@ -129,6 +129,7 @@ content-platform/
 │   └── testkit/
 │       └── integration.go
 ├── migrations/
+│   ├── 00001_m1_baseline.sql
 │   └── README.md
 ├── .env.example
 ├── Makefile
@@ -244,6 +245,8 @@ LOG_FORMAT=json
 ## 7. 日志与 HTTP 基线
 
 日志使用标准库 `log/slog`。本地允许 text 输出，类生产环境默认 JSON。基础字段至少包含 `service` 和 `environment`。
+
+Go-redis 的内部 logger 在应用组装时适配到同一个 `slog.Logger`，避免 Redis 重试信息绕过结构化日志输出到标准库默认 logger。
 
 请求中间件顺序为：
 
@@ -369,7 +372,7 @@ go run ./cmd/migrate version
 go run ./cmd/migrate down-one
 ```
 
-M1 建立工具、目录和文档，不创建无业务意义的探针表。M2 的用户与会话表将成为首批业务 migration。
+Goose v3.27.1 在目录中没有任何 migration 文件时会返回 `ErrNoMigrationFiles`，且不会创建版本表。因此 M1 提供 `00001_m1_baseline.sql`：其 Up/Down 都只执行 `SELECT 1`，用于验证 migration 链路并让 goose 创建自己的 `goose_db_version`。该 baseline 不创建业务表、索引或其他业务对象。M2 从 `00002` 开始添加用户与会话 schema。
 
 规则：
 
@@ -378,7 +381,7 @@ M1 建立工具、目录和文档，不创建无业务意义的探针表。M2 �
 - migration 与依赖它的代码在同一里程碑交付；
 - 唯一约束、外键和索引进入 migration；
 - `down` 或 `down-one` 在共享环境中谨慎使用；
-- 空 migration 集合也必须能完成 `up` 与 `status` 验证。
+- 只包含 M1 baseline 的 migration 集合必须能在空数据库完成 `up` 与 `status` 验证。
 
 ## 12. 测试策略
 
@@ -403,7 +406,7 @@ go test -race ./...
 集成测试显式运行：
 
 ```bash
-go test -tags=integration ./...
+go test -count=1 -tags=integration ./...
 ```
 
 集成测试通过 `TEST_DATABASE_URL` 和 `TEST_REDIS_ADDR` 访问专用测试依赖，至少覆盖真实连接、migration、readiness checker 与资源关闭。直接执行带 build tag 的 Go 测试时，缺少相应环境变量的测试明确 `Skip`；`make test-integration` 在执行前校验两个变量，缺失时以非零状态失败，避免误把全部跳过当成通过。M1 不引入 Testcontainers，也不预建业务 fixture。

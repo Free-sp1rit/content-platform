@@ -916,13 +916,12 @@ func runMain() int {
 
 ```bash
 go test ./internal/app -v
-go build ./cmd/server
+go build -o /tmp/content-platform-server ./cmd/server
 git add cmd/server internal/app
 git commit -m "feat: add server lifecycle and dependency assembly"
 ```
 
 Expected: PASS and the server command builds.
- Expected: PASS and the server command builds.
 
 ## Task 9: Add migration and integration test tooling
 
@@ -934,6 +933,7 @@ Expected: PASS and the server command builds.
 - Create: `internal/infra/postgres/postgres_integration_test.go`
 - Create: `internal/infra/redis/redis_integration_test.go`
 - Create: `internal/infra/postgres/migration/migration_integration_test.go`
+- Create: `migrations/00001_m1_baseline.sql`
 - Create: `migrations/README.md`
 - Modify: `go.mod`
 - Modify: `go.sum`
@@ -993,17 +993,17 @@ All integration test files use the same build tag:
 
 - PostgreSQL: open with `TEST_DATABASE_URL`, ping, and close.
 - Redis: create with `TEST_REDIS_ADDR`, ping through the checker, and close.
-- Migration: use `t.TempDir()` as an empty migration directory, open PostgreSQL, call `Run(..., "up")`, then `Run(..., "status")`.
+- Migration: locate the repository `migrations` directory, open PostgreSQL, call `Run(..., "up")`, then `Run(..., "status")`; the baseline must create only goose's version table.
 
 - [ ] **Step 6: Document migration rules**
 
-`migrations/README.md` defines `00001_description.sql`, goose Up/Down sections, immutability after shared execution, repair through a new migration, and the intentional absence of business migrations in M1.
+Create `00001_m1_baseline.sql` with `SELECT 1` in both goose Up and Down sections. `migrations/README.md` explains that the baseline exists because goose rejects an empty directory, defines the `00002_description.sql` convention for the first business migration, and records immutability and repair-through-new-migration rules.
 
 - [ ] **Step 7: Run unit checks, build, tidy, and commit**
 
 ```bash
 go test ./internal/infra/postgres/migration -v
-go build ./cmd/migrate
+go build -o /tmp/content-platform-migrate ./cmd/migrate
 go mod tidy
 go mod verify
 git add cmd/migrate internal/infra/postgres/migration internal/infra/postgres/postgres_integration_test.go internal/infra/redis/redis_integration_test.go internal/testkit migrations go.mod go.sum
@@ -1054,7 +1054,7 @@ test-race:
 test-integration:
 	@test -n "$$TEST_DATABASE_URL" || (echo "TEST_DATABASE_URL is required" >&2; exit 1)
 	@test -n "$$TEST_REDIS_ADDR" || (echo "TEST_REDIS_ADDR is required" >&2; exit 1)
-	go test -tags=integration ./...
+	go test -count=1 -tags=integration ./...
 
 migrate-up:
 	go run ./cmd/migrate up
