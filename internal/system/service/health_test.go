@@ -60,16 +60,30 @@ func TestReadinessHonorsDependencyTimeout(t *testing.T) {
 }
 
 func TestReadinessChecksDependenciesConcurrently(t *testing.T) {
-	health := New(delayChecker{delay: 60 * time.Millisecond}, delayChecker{delay: 60 * time.Millisecond}, time.Second, time.Second)
-	started := time.Now()
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	health := New(gateChecker{started: started, release: release}, gateChecker{started: started, release: release}, time.Second, time.Second)
+	done := make(chan Readiness, 1)
+	go func() {
+		done <- health.Readiness(context.Background())
+	}()
 
-	got := health.Readiness(context.Background())
-
-	if got.Status != Ready {
-		t.Fatalf("Readiness() = %#v", got)
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(250 * time.Millisecond):
+			t.Fatal("both dependency checks did not start concurrently")
+		}
 	}
-	if elapsed := time.Since(started); elapsed > 110*time.Millisecond {
-		t.Fatalf("dependency checks were not concurrent: %s", elapsed)
+	close(release)
+
+	select {
+	case got := <-done:
+		if got.Status != Ready {
+			t.Fatalf("Readiness() = %#v", got)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("Readiness() did not complete after releasing checkers")
 	}
 }
 
@@ -88,13 +102,15 @@ func (blockingChecker) Ping(ctx context.Context) error {
 	return ctx.Err()
 }
 
-type delayChecker struct {
-	delay time.Duration
+type gateChecker struct {
+	started chan<- struct{}
+	release <-chan struct{}
 }
 
-func (c delayChecker) Ping(ctx context.Context) error {
+func (c gateChecker) Ping(ctx context.Context) error {
+	c.started <- struct{}{}
 	select {
-	case <-time.After(c.delay):
+	case <-c.release:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

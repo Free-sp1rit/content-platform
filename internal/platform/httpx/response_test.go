@@ -110,3 +110,22 @@ func TestWriteErrorDoesNotMutateApplicationError(t *testing.T) {
 		t.Fatalf("internal response leaked contextual message: %s", response.Body.String())
 	}
 }
+
+func TestWriteErrorHidesUnknownApplicationKind(t *testing.T) {
+	var logs bytes.Buffer
+	response := httptest.NewRecorder()
+	err := apperror.New(apperror.Kind("unexpected_kind"), "unexpected_code", "secret internal context")
+
+	WriteError(context.Background(), response, slog.New(slog.NewJSONHandler(&logs, nil)), err)
+
+	body := response.Body.String()
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if strings.Contains(body, "secret internal context") || strings.Contains(body, "unexpected_code") {
+		t.Fatalf("unknown application kind leaked response data: %s", body)
+	}
+	if !strings.Contains(body, `"code":"internal_error"`) || !strings.Contains(logs.String(), "secret internal context") {
+		t.Fatalf("unexpected response or logs: body=%s logs=%s", body, logs.String())
+	}
+}

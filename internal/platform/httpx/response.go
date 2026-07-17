@@ -43,17 +43,26 @@ func WriteData(ctx context.Context, w http.ResponseWriter, status int, data any)
 
 func WriteError(ctx context.Context, w http.ResponseWriter, logger *slog.Logger, err error) {
 	appErr, ok := apperror.From(err)
-	message := ""
+	status := http.StatusInternalServerError
 	if !ok {
 		logInternalError(ctx, logger, err)
 		appErr = apperror.New(apperror.Internal, string(apperror.Internal), "internal server error")
-	} else if appErr.Kind == apperror.Internal {
-		cause := errors.Unwrap(appErr)
-		if cause != nil {
-			logInternalError(ctx, logger, cause)
+	} else {
+		var knownKind bool
+		status, knownKind = statusForKind(appErr.Kind)
+		if !knownKind {
+			logInternalError(ctx, logger, appErr)
+			appErr = apperror.New(apperror.Internal, string(apperror.Internal), "internal server error")
+			status = http.StatusInternalServerError
+		} else if appErr.Kind == apperror.Internal {
+			cause := errors.Unwrap(appErr)
+			if cause != nil {
+				logInternalError(ctx, logger, cause)
+			}
 		}
 	}
-	message = appErr.Message
+
+	message := appErr.Message
 	if appErr.Kind == apperror.Internal {
 		message = "internal server error"
 	}
@@ -70,29 +79,31 @@ func WriteError(ctx context.Context, w http.ResponseWriter, logger *slog.Logger,
 		},
 		Meta: responseMeta{RequestID: requestid.FromContext(ctx)},
 	}
-	writeJSON(w, statusForKind(appErr.Kind), payload)
+	writeJSON(w, status, payload)
 }
 
-func statusForKind(kind apperror.Kind) int {
+func statusForKind(kind apperror.Kind) (int, bool) {
 	switch kind {
 	case apperror.InvalidArgument:
-		return http.StatusBadRequest
+		return http.StatusBadRequest, true
 	case apperror.Unauthenticated:
-		return http.StatusUnauthorized
+		return http.StatusUnauthorized, true
 	case apperror.PermissionDenied:
-		return http.StatusForbidden
+		return http.StatusForbidden, true
 	case apperror.NotFound:
-		return http.StatusNotFound
+		return http.StatusNotFound, true
 	case apperror.MethodNotAllowed:
-		return http.StatusMethodNotAllowed
+		return http.StatusMethodNotAllowed, true
 	case apperror.Conflict:
-		return http.StatusConflict
+		return http.StatusConflict, true
 	case apperror.RateLimited:
-		return http.StatusTooManyRequests
+		return http.StatusTooManyRequests, true
+	case apperror.Internal:
+		return http.StatusInternalServerError, true
 	case apperror.DependencyUnavailable:
-		return http.StatusServiceUnavailable
+		return http.StatusServiceUnavailable, true
 	default:
-		return http.StatusInternalServerError
+		return http.StatusInternalServerError, false
 	}
 }
 
