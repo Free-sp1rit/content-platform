@@ -90,23 +90,8 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(string(c.Environment)) == "" {
 		return fmt.Errorf("APP_ENV must not be empty")
 	}
-	if strings.TrimSpace(c.HTTP.Address) == "" {
-		return fmt.Errorf("HTTP_ADDR must not be empty")
-	}
-	if c.HTTP.ReadHeaderTimeout <= 0 {
-		return fmt.Errorf("HTTP_READ_HEADER_TIMEOUT must be greater than zero")
-	}
-	if c.HTTP.ReadTimeout <= 0 {
-		return fmt.Errorf("HTTP_READ_TIMEOUT must be greater than zero")
-	}
-	if c.HTTP.WriteTimeout <= 0 {
-		return fmt.Errorf("HTTP_WRITE_TIMEOUT must be greater than zero")
-	}
-	if c.HTTP.IdleTimeout <= 0 {
-		return fmt.Errorf("HTTP_IDLE_TIMEOUT must be greater than zero")
-	}
-	if c.HTTP.ShutdownTimeout <= 0 {
-		return fmt.Errorf("HTTP_SHUTDOWN_TIMEOUT must be greater than zero")
+	if err := c.HTTP.Validate(); err != nil {
+		return err
 	}
 	if strings.TrimSpace(c.Database.URL) == "" {
 		return fmt.Errorf("DATABASE_URL is required")
