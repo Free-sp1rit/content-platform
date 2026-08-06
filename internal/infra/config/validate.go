@@ -57,6 +57,34 @@ func (c DatabaseConfig) Validate() error {
 	return nil
 }
 
+func (c RedisConfig) Validate() error {
+	if !validTCPAddress(c.Address, true) {
+		return fmt.Errorf("REDIS_ADDR must be a valid TCP address with a host")
+	}
+	if c.DB < 0 {
+		return fmt.Errorf("REDIS_DB must not be negative")
+	}
+	if c.PingTimeout <= 0 {
+		return fmt.Errorf("REDIS_PING_TIMEOUT must be greater than zero")
+	}
+	return nil
+}
+
+func (c LogConfig) Validate() error {
+	switch c.Level {
+	case LogLevelDebug, LogLevelInfo, LogLevelWarn, LogLevelError:
+	default:
+		return fmt.Errorf("LOG_LEVEL must be one of debug, info, warn, or error")
+	}
+
+	switch c.Format {
+	case LogFormatJSON, LogFormatText:
+	default:
+		return fmt.Errorf("LOG_FORMAT must be one of json or text")
+	}
+	return nil
+}
+
 func validDatabaseURL(value string) bool {
 	parsed, err := url.ParseRequestURI(value)
 	if err != nil {

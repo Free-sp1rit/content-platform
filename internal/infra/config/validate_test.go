@@ -128,3 +128,147 @@ func validDatabaseConfig() DatabaseConfig {
 		PingTimeout:     3 * time.Second,
 	}
 }
+
+func TestRedisConfigValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*RedisConfig)
+		wantErr string
+	}{
+		{name: "valid hostname", mutate: func(*RedisConfig) {}},
+		{name: "valid IPv4", mutate: func(c *RedisConfig) { c.Address = "127.0.0.1:6379" }},
+		{name: "valid IPv6", mutate: func(c *RedisConfig) { c.Address = "[::1]:6379" }},
+		{name: "missing host", mutate: func(c *RedisConfig) { c.Address = ":6379" }, wantErr: "REDIS_ADDR"},
+		{name: "missing port", mutate: func(c *RedisConfig) { c.Address = "localhost" }, wantErr: "REDIS_ADDR"},
+		{name: "named port", mutate: func(c *RedisConfig) { c.Address = "localhost:redis" }, wantErr: "REDIS_ADDR"},
+		{name: "zero port", mutate: func(c *RedisConfig) { c.Address = "localhost:0" }, wantErr: "REDIS_ADDR"},
+		{name: "port too large", mutate: func(c *RedisConfig) { c.Address = "localhost:65536" }, wantErr: "REDIS_ADDR"},
+		{name: "zero database", mutate: func(c *RedisConfig) { c.DB = 0 }},
+		{name: "negative database", mutate: func(c *RedisConfig) { c.DB = -1 }, wantErr: "REDIS_DB"},
+		{name: "zero ping timeout", mutate: func(c *RedisConfig) { c.PingTimeout = 0 }, wantErr: "REDIS_PING_TIMEOUT"},
+		{name: "negative ping timeout", mutate: func(c *RedisConfig) { c.PingTimeout = -time.Second }, wantErr: "REDIS_PING_TIMEOUT"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validRedisConfig()
+			tt.mutate(&cfg)
+
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLogConfigValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     LogConfig
+		wantErr string
+	}{
+		{name: "debug JSON", cfg: LogConfig{Level: LogLevelDebug, Format: LogFormatJSON}},
+		{name: "info text", cfg: LogConfig{Level: LogLevelInfo, Format: LogFormatText}},
+		{name: "warn JSON", cfg: LogConfig{Level: LogLevelWarn, Format: LogFormatJSON}},
+		{name: "error text", cfg: LogConfig{Level: LogLevelError, Format: LogFormatText}},
+		{name: "invalid level", cfg: LogConfig{Level: LogLevel("verbose"), Format: LogFormatJSON}, wantErr: "LOG_LEVEL"},
+		{name: "invalid format", cfg: LogConfig{Level: LogLevelInfo, Format: LogFormat("yaml")}, wantErr: "LOG_FORMAT"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestConfigValidateReturnsFirstErrorInStableOrder(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{
+			name: "environment before HTTP",
+			mutate: func(c *Config) {
+				c.Environment = ""
+				c.HTTP.Address = "invalid"
+			},
+			wantErr: "APP_ENV",
+		},
+		{
+			name: "HTTP before database",
+			mutate: func(c *Config) {
+				c.HTTP.Address = "invalid"
+				c.Database.URL = ""
+			},
+			wantErr: "HTTP_ADDR",
+		},
+		{
+			name: "database before Redis",
+			mutate: func(c *Config) {
+				c.Database.URL = ""
+				c.Redis.Address = "invalid"
+			},
+			wantErr: "DATABASE_URL",
+		},
+		{
+			name: "Redis before log",
+			mutate: func(c *Config) {
+				c.Redis.Address = "invalid"
+				c.Log.Level = LogLevel("verbose")
+			},
+			wantErr: "REDIS_ADDR",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			tt.mutate(&cfg)
+
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func validRedisConfig() RedisConfig {
+	return RedisConfig{
+		Address:     "localhost:6379",
+		Password:    "",
+		DB:          0,
+		PingTimeout: 2 * time.Second,
+	}
+}
+
+func validConfig() Config {
+	return Config{
+		Environment: EnvironmentLocal,
+		HTTP:        validHTTPConfig(),
+		Database:    validDatabaseConfig(),
+		Redis:       validRedisConfig(),
+		Log: LogConfig{
+			Level:  LogLevelInfo,
+			Format: LogFormatJSON,
+		},
+	}
+}

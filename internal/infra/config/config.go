@@ -96,29 +96,11 @@ func (c Config) Validate() error {
 	if err := c.Database.Validate(); err != nil {
 		return err
 	}
-	if strings.TrimSpace(c.Redis.Address) == "" {
-		return fmt.Errorf("REDIS_ADDR must not be empty")
+	if err := c.Redis.Validate(); err != nil {
+		return err
 	}
-	if c.Redis.DB < 0 {
-		return fmt.Errorf("REDIS_DB must not be negative")
-	}
-	if c.Redis.PingTimeout <= 0 {
-		return fmt.Errorf("REDIS_PING_TIMEOUT must be greater than zero")
-	}
-	if !oneOf(string(c.Log.Level), "debug", "info", "warn", "error") {
-		return fmt.Errorf("LOG_LEVEL must be one of debug, info, warn, or error")
-	}
-	if !oneOf(string(c.Log.Format), "json", "text") {
-		return fmt.Errorf("LOG_FORMAT must be one of json or text")
+	if err := c.Log.Validate(); err != nil {
+		return err
 	}
 	return nil
-}
-
-func oneOf(value string, allowed ...string) bool {
-	for _, candidate := range allowed {
-		if value == candidate {
-			return true
-		}
-	}
-	return false
 }
