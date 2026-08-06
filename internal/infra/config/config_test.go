@@ -37,14 +37,23 @@ func TestLoadUsesDefaults(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if cfg.Environment != "local" || cfg.HTTP.Address != ":8080" {
-		t.Fatalf("unexpected defaults: %#v", cfg)
+	if cfg.Environment != EnvironmentLocal {
+		t.Fatalf("Environment = %q, want %q", cfg.Environment, EnvironmentLocal)
 	}
-	if cfg.HTTP.ReadHeaderTimeout != 5*time.Second || cfg.Database.MaxOpenConns != 20 {
-		t.Fatalf("unexpected timeout or pool defaults: %#v", cfg)
+	if cfg.HTTP.Address != ":8080" {
+		t.Fatalf("HTTP.Address = %q, want %q", cfg.HTTP.Address, ":8080")
 	}
-	if cfg.Log.Level != "info" || cfg.Log.Format != "json" {
-		t.Fatalf("unexpected log defaults: %#v", cfg.Log)
+	if cfg.HTTP.ReadHeaderTimeout != 5*time.Second {
+		t.Fatalf("HTTP.ReadHeaderTimeout = %v, want %v", cfg.HTTP.ReadHeaderTimeout, 5*time.Second)
+	}
+	if cfg.Database.MaxOpenConns != 20 {
+		t.Fatalf("Database.MaxOpenConns = %d, want %d", cfg.Database.MaxOpenConns, 20)
+	}
+	if cfg.Log.Level != LogLevelInfo {
+		t.Fatalf("Log.Level = %q, want %q", cfg.Log.Level, LogLevelInfo)
+	}
+	if cfg.Log.Format != LogFormatJSON {
+		t.Fatalf("Log.Format = %q, want %q", cfg.Log.Format, LogFormatJSON)
 	}
 }
 
@@ -79,14 +88,95 @@ func TestLoadParsesEnvironment(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if cfg.Environment != "staging" || cfg.HTTP.Address != ":9090" {
-		t.Fatalf("unexpected top-level config: %#v", cfg)
+	if cfg.Environment != Environment("staging") {
+		t.Fatalf("Environment = %q, want %q", cfg.Environment, Environment("staging"))
 	}
-	if cfg.Database.MaxOpenConns != 9 || cfg.Database.ConnMaxLifetime != 7*time.Minute {
-		t.Fatalf("unexpected database config: %#v", cfg.Database)
+	if cfg.HTTP.Address != ":9090" {
+		t.Fatalf("HTTP.Address = %q, want %q", cfg.HTTP.Address, ":9090")
 	}
-	if cfg.Redis.Address != "redis.example:6380" || cfg.Redis.Password != "secret" || cfg.Redis.DB != 4 {
-		t.Fatalf("unexpected Redis config: %#v", cfg.Redis)
+	if cfg.Database.MaxOpenConns != 9 {
+		t.Fatalf("Database.MaxOpenConns = %d, want %d", cfg.Database.MaxOpenConns, 9)
+	}
+	if cfg.Database.ConnMaxLifetime != 7*time.Minute {
+		t.Fatalf("Database.ConnMaxLifetime = %v, want %v", cfg.Database.ConnMaxLifetime, 7*time.Minute)
+	}
+	if cfg.Redis.Address != "redis.example:6380" {
+		t.Fatalf("Redis.Address = %q, want %q", cfg.Redis.Address, "redis.example:6380")
+	}
+	if cfg.Redis.Password != "secret" {
+		t.Fatal("Redis.Password did not preserve configured value")
+	}
+	if cfg.Redis.DB != 4 {
+		t.Fatalf("Redis.DB = %d, want %d", cfg.Redis.DB, 4)
+	}
+	if cfg.Log.Level != LogLevelDebug {
+		t.Fatalf("Log.Level = %q, want %q", cfg.Log.Level, LogLevelDebug)
+	}
+	if cfg.Log.Format != LogFormatText {
+		t.Fatalf("Log.Format = %q, want %q", cfg.Log.Format, LogFormatText)
+	}
+}
+
+func TestLoadNormalizesNonSecretStringsAndPreservesPassword(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("APP_ENV", " Staging-Blue ")
+	t.Setenv("HTTP_ADDR", " :9090 ")
+	t.Setenv("DATABASE_URL", " postgres://localhost/custom ")
+	t.Setenv("REDIS_ADDR", " redis.example:6380 ")
+	t.Setenv("REDIS_PASSWORD", " secret with spaces ")
+	t.Setenv("LOG_LEVEL", " WARN ")
+	t.Setenv("LOG_FORMAT", " TEXT ")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Environment != Environment("Staging-Blue") {
+		t.Fatalf("Environment = %q, want %q", cfg.Environment, "Staging-Blue")
+	}
+	if cfg.HTTP.Address != ":9090" {
+		t.Fatalf("HTTP.Address = %q, want %q", cfg.HTTP.Address, ":9090")
+	}
+	if cfg.Database.URL != "postgres://localhost/custom" {
+		t.Fatal("Database.URL was not normalized")
+	}
+	if cfg.Redis.Address != "redis.example:6380" {
+		t.Fatalf("Redis.Address = %q, want %q", cfg.Redis.Address, "redis.example:6380")
+	}
+	if cfg.Redis.Password != " secret with spaces " {
+		t.Fatal("Redis.Password was modified")
+	}
+	if cfg.Log.Level != LogLevelWarn {
+		t.Fatalf("Log.Level = %q, want %q", cfg.Log.Level, LogLevelWarn)
+	}
+	if cfg.Log.Format != LogFormatText {
+		t.Fatalf("Log.Format = %q, want %q", cfg.Log.Format, LogFormatText)
+	}
+}
+
+func TestLoadRejectsParserErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "invalid HTTP duration", key: "HTTP_READ_TIMEOUT", value: "not-a-duration"},
+		{name: "invalid database pool size", key: "DATABASE_MAX_OPEN_CONNS", value: "many"},
+		{name: "invalid Redis database", key: "REDIS_DB", value: "db-zero"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearConfigEnvironment(t)
+			t.Setenv("DATABASE_URL", "postgres://localhost/content_platform")
+			t.Setenv(tt.key, tt.value)
+
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), "parse configuration") {
+				t.Fatalf("Load() error = %v, want parse configuration error", err)
+			}
+		})
 	}
 }
 

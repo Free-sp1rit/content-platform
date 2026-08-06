@@ -11,17 +11,17 @@ import (
 
 func TestParseLevel(t *testing.T) {
 	tests := []struct {
-		input string
+		input config.LogLevel
 		want  slog.Level
 	}{
-		{input: "debug", want: slog.LevelDebug},
-		{input: "info", want: slog.LevelInfo},
-		{input: "warn", want: slog.LevelWarn},
-		{input: "error", want: slog.LevelError},
+		{input: config.LogLevelDebug, want: slog.LevelDebug},
+		{input: config.LogLevelInfo, want: slog.LevelInfo},
+		{input: config.LogLevelWarn, want: slog.LevelWarn},
+		{input: config.LogLevelError, want: slog.LevelError},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
+		t.Run(string(tt.input), func(t *testing.T) {
 			got, err := ParseLevel(tt.input)
 			if err != nil {
 				t.Fatalf("ParseLevel(%q) error = %v", tt.input, err)
@@ -32,14 +32,14 @@ func TestParseLevel(t *testing.T) {
 		})
 	}
 
-	if _, err := ParseLevel("verbose"); err == nil {
+	if _, err := ParseLevel(config.LogLevel("verbose")); err == nil {
 		t.Fatal("ParseLevel(verbose) expected error")
 	}
 }
 
 func TestNewJSONLoggerIncludesBaseFields(t *testing.T) {
 	var output bytes.Buffer
-	logger, err := New(config.LogConfig{Level: "info", Format: "json"}, &output, "test")
+	logger, err := New(config.LogConfig{Level: config.LogLevelInfo, Format: config.LogFormatJSON}, &output, config.Environment("test"))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -55,7 +55,7 @@ func TestNewJSONLoggerIncludesBaseFields(t *testing.T) {
 
 func TestNewHonorsLevelAndTextFormat(t *testing.T) {
 	var output bytes.Buffer
-	logger, err := New(config.LogConfig{Level: "warn", Format: "text"}, &output, "local")
+	logger, err := New(config.LogConfig{Level: config.LogLevelWarn, Format: config.LogFormatText}, &output, config.EnvironmentLocal)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -70,7 +70,7 @@ func TestNewHonorsLevelAndTextFormat(t *testing.T) {
 }
 
 func TestNewRejectsUnsupportedFormat(t *testing.T) {
-	if _, err := New(config.LogConfig{Level: "info", Format: "yaml"}, &bytes.Buffer{}, "test"); err == nil {
+	if _, err := New(config.LogConfig{Level: config.LogLevelInfo, Format: config.LogFormat("yaml")}, &bytes.Buffer{}, config.Environment("test")); err == nil {
 		t.Fatal("New() expected unsupported format error")
 	}
 }
