@@ -3,8 +3,11 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func (c HTTPConfig) Validate() error {
@@ -27,6 +30,46 @@ func (c HTTPConfig) Validate() error {
 		return fmt.Errorf("HTTP_SHUTDOWN_TIMEOUT must be greater than zero")
 	}
 	return nil
+}
+
+func (c DatabaseConfig) Validate() error {
+	if strings.TrimSpace(c.URL) == "" {
+		return fmt.Errorf("DATABASE_URL is required")
+	}
+	if !validDatabaseURL(c.URL) {
+		return fmt.Errorf("DATABASE_URL must be a valid PostgreSQL URL")
+	}
+	if c.MaxOpenConns <= 0 {
+		return fmt.Errorf("DATABASE_MAX_OPEN_CONNS must be greater than zero")
+	}
+	if c.MaxIdleConns < 0 {
+		return fmt.Errorf("DATABASE_MAX_IDLE_CONNS must not be negative")
+	}
+	if c.MaxIdleConns > c.MaxOpenConns {
+		return fmt.Errorf("DATABASE_MAX_IDLE_CONNS must not exceed DATABASE_MAX_OPEN_CONNS")
+	}
+	if c.ConnMaxLifetime <= 0 {
+		return fmt.Errorf("DATABASE_CONN_MAX_LIFETIME must be greater than zero")
+	}
+	if c.PingTimeout <= 0 {
+		return fmt.Errorf("DATABASE_PING_TIMEOUT must be greater than zero")
+	}
+	return nil
+}
+
+func validDatabaseURL(value string) bool {
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil {
+		return false
+	}
+	if parsed.Scheme != "postgres" && parsed.Scheme != "postgresql" {
+		return false
+	}
+	if strings.Trim(parsed.Path, "/") == "" {
+		return false
+	}
+	_, err = pgx.ParseConfig(value)
+	return err == nil
 }
 
 func validTCPAddress(address string, requireHost bool) bool {

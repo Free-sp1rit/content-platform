@@ -187,6 +187,8 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		wantErr string
 	}{
 		{name: "missing database URL", env: map[string]string{}, wantErr: "DATABASE_URL is required"},
+		{name: "invalid database URL", env: map[string]string{"DATABASE_URL": "mysql://user:db-password-do-not-log@localhost/content_platform"}, wantErr: "DATABASE_URL"},
+		{name: "zero max open connections", env: map[string]string{"DATABASE_URL": "postgres://localhost/content_platform", "DATABASE_MAX_OPEN_CONNS": "0"}, wantErr: "DATABASE_MAX_OPEN_CONNS"},
 		{name: "invalid log level", env: map[string]string{"DATABASE_URL": "postgres://localhost/db", "LOG_LEVEL": "verbose"}, wantErr: "LOG_LEVEL"},
 		{name: "invalid log format", env: map[string]string{"DATABASE_URL": "postgres://localhost/db", "LOG_FORMAT": "yaml"}, wantErr: "LOG_FORMAT"},
 		{name: "idle exceeds open", env: map[string]string{"DATABASE_URL": "postgres://localhost/db", "DATABASE_MAX_OPEN_CONNS": "2", "DATABASE_MAX_IDLE_CONNS": "3"}, wantErr: "DATABASE_MAX_IDLE_CONNS"},

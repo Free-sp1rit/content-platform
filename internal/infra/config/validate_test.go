@@ -60,3 +60,71 @@ func validHTTPConfig() HTTPConfig {
 		ShutdownTimeout:   10 * time.Second,
 	}
 }
+
+func TestDatabaseConfigValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*DatabaseConfig)
+		wantErr string
+	}{
+		{name: "valid postgres URL", mutate: func(*DatabaseConfig) {}},
+		{name: "valid postgresql URL", mutate: func(c *DatabaseConfig) { c.URL = "postgresql://localhost/content_platform" }},
+		{name: "missing URL", mutate: func(c *DatabaseConfig) { c.URL = "" }, wantErr: "DATABASE_URL"},
+		{name: "unsupported scheme", mutate: func(c *DatabaseConfig) { c.URL = "mysql://localhost/content_platform" }, wantErr: "DATABASE_URL"},
+		{name: "missing database name", mutate: func(c *DatabaseConfig) { c.URL = "postgres://localhost/" }, wantErr: "DATABASE_URL"},
+		{name: "database name only in query", mutate: func(c *DatabaseConfig) { c.URL = "postgres://localhost?dbname=content_platform" }, wantErr: "DATABASE_URL"},
+		{name: "invalid driver port", mutate: func(c *DatabaseConfig) { c.URL = "postgres://localhost:notaport/content_platform" }, wantErr: "DATABASE_URL"},
+		{name: "negative max open", mutate: func(c *DatabaseConfig) { c.MaxOpenConns = -1 }, wantErr: "DATABASE_MAX_OPEN_CONNS"},
+		{name: "zero max open", mutate: func(c *DatabaseConfig) { c.MaxOpenConns = 0 }, wantErr: "DATABASE_MAX_OPEN_CONNS"},
+		{name: "one max open", mutate: func(c *DatabaseConfig) { c.MaxOpenConns = 1; c.MaxIdleConns = 1 }},
+		{name: "negative max idle", mutate: func(c *DatabaseConfig) { c.MaxIdleConns = -1 }, wantErr: "DATABASE_MAX_IDLE_CONNS"},
+		{name: "zero max idle", mutate: func(c *DatabaseConfig) { c.MaxIdleConns = 0 }},
+		{name: "idle equals open", mutate: func(c *DatabaseConfig) { c.MaxIdleConns = c.MaxOpenConns }},
+		{name: "idle exceeds open", mutate: func(c *DatabaseConfig) { c.MaxIdleConns = c.MaxOpenConns + 1 }, wantErr: "DATABASE_MAX_IDLE_CONNS"},
+		{name: "zero max lifetime", mutate: func(c *DatabaseConfig) { c.ConnMaxLifetime = 0 }, wantErr: "DATABASE_CONN_MAX_LIFETIME"},
+		{name: "negative max lifetime", mutate: func(c *DatabaseConfig) { c.ConnMaxLifetime = -time.Second }, wantErr: "DATABASE_CONN_MAX_LIFETIME"},
+		{name: "zero ping timeout", mutate: func(c *DatabaseConfig) { c.PingTimeout = 0 }, wantErr: "DATABASE_PING_TIMEOUT"},
+		{name: "negative ping timeout", mutate: func(c *DatabaseConfig) { c.PingTimeout = -time.Second }, wantErr: "DATABASE_PING_TIMEOUT"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validDatabaseConfig()
+			tt.mutate(&cfg)
+
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestDatabaseConfigValidateDoesNotExposeURL(t *testing.T) {
+	cfg := validDatabaseConfig()
+	cfg.URL = "mysql://user:db-password-do-not-log@localhost/content_platform"
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() expected error")
+	}
+	if strings.Contains(err.Error(), "db-password-do-not-log") || strings.Contains(err.Error(), cfg.URL) {
+		t.Fatal("Validate() exposed DATABASE_URL")
+	}
+}
+
+func validDatabaseConfig() DatabaseConfig {
+	return DatabaseConfig{
+		URL:             "postgres://localhost/content_platform",
+		MaxOpenConns:    20,
+		MaxIdleConns:    5,
+		ConnMaxLifetime: 30 * time.Minute,
+		PingTimeout:     3 * time.Second,
+	}
+}

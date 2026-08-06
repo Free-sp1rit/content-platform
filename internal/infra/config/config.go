@@ -93,23 +93,8 @@ func (c Config) Validate() error {
 	if err := c.HTTP.Validate(); err != nil {
 		return err
 	}
-	if strings.TrimSpace(c.Database.URL) == "" {
-		return fmt.Errorf("DATABASE_URL is required")
-	}
-	if c.Database.MaxOpenConns < 0 {
-		return fmt.Errorf("DATABASE_MAX_OPEN_CONNS must not be negative")
-	}
-	if c.Database.MaxIdleConns < 0 {
-		return fmt.Errorf("DATABASE_MAX_IDLE_CONNS must not be negative")
-	}
-	if c.Database.MaxOpenConns > 0 && c.Database.MaxIdleConns > c.Database.MaxOpenConns {
-		return fmt.Errorf("DATABASE_MAX_IDLE_CONNS must not exceed DATABASE_MAX_OPEN_CONNS")
-	}
-	if c.Database.ConnMaxLifetime <= 0 {
-		return fmt.Errorf("DATABASE_CONN_MAX_LIFETIME must be greater than zero")
-	}
-	if c.Database.PingTimeout <= 0 {
-		return fmt.Errorf("DATABASE_PING_TIMEOUT must be greater than zero")
+	if err := c.Database.Validate(); err != nil {
+		return err
 	}
 	if strings.TrimSpace(c.Redis.Address) == "" {
 		return fmt.Errorf("REDIS_ADDR must not be empty")
