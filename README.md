@@ -56,6 +56,15 @@ set +a
 
 `.env` 已被 Git 忽略；不要提交真实密码、token 或生产连接信息。
 
+配置加载会去除 `APP_ENV`、HTTP 地址、数据库 URL 和 Redis 地址的首尾空白，并把日志级别与日志格式转换为小写；`REDIS_PASSWORD` 始终原样保留。
+
+数据库连接池规则：
+
+- `DATABASE_MAX_OPEN_CONNS` 必须大于零。Go 的 `database/sql` 会把零解释为不限制连接数，因此应用拒绝该值；
+- `DATABASE_MAX_IDLE_CONNS` 可以为零，表示不保留空闲连接，但不能为负数或超过最大打开连接数。
+
+不要记录完整 `Config`，也不要单独记录数据库 URL 或 Redis 密码。配置类型为 `slog` 提供了脱敏表示作为误用防护，但这不替代字段级日志设计和代码审查。
+
 ## 准备依赖
 
 M1 不提供 Docker Compose。请使用本机服务或自行管理的容器准备：

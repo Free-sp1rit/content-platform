@@ -232,15 +232,18 @@ LOG_FORMAT=json
 
 规则：
 
-- `DATABASE_URL` 必填。
-- timeout 必须大于零。
-- 连接数不能为负数，idle 数不能超过 open 数。
+- `DATABASE_URL` 必填，只接受包含数据库名的 `postgres://` 或 `postgresql://` URL。
+- 所有 timeout 必须大于零。
+- `DATABASE_MAX_OPEN_CONNS` 必须大于零；零在 `database/sql` 中表示无限连接，因此不允许。
+- `DATABASE_MAX_IDLE_CONNS` 可以为零，不能为负数，也不能超过 open 数。
 - Redis DB 不能为负数。
+- HTTP 和 Redis 地址必须使用带数值端口的 TCP `host:port` 形式。
 - 日志级别只允许 `debug`、`info`、`warn`、`error`。
 - 日志格式只允许 `json`、`text`。
+- 非敏感字符串在加载边界去除首尾空白，日志级别和格式再转换为小写；Redis 密码原样保留。
 - `.env.example` 只包含无秘密的示例值。
 - 应用不自动读取工作目录中的 `.env`；本地运行由 shell 或 Makefile 导入环境。
-- 错误和日志不得输出数据库密码、Redis 密码、token 或完整 `Authorization` header。
+- 错误和日志不得输出数据库 URL、Redis 密码、token 或完整 `Authorization` header；配置的 `slog` 表示必须脱敏。
 
 ## 7. 日志与 HTTP 基线
 

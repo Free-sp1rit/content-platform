@@ -8,22 +8,22 @@ import (
 	"github.com/Free-sp1rit/content-platform/internal/infra/config"
 )
 
-func ParseLevel(value string) (slog.Level, error) {
+func ParseLevel(value config.LogLevel) (slog.Level, error) {
 	switch value {
-	case "debug":
+	case config.LogLevelDebug:
 		return slog.LevelDebug, nil
-	case "info":
+	case config.LogLevelInfo:
 		return slog.LevelInfo, nil
-	case "warn":
+	case config.LogLevelWarn:
 		return slog.LevelWarn, nil
-	case "error":
+	case config.LogLevelError:
 		return slog.LevelError, nil
 	default:
 		return 0, fmt.Errorf("unsupported log level %q", value)
 	}
 }
 
-func New(cfg config.LogConfig, output io.Writer, environment string) (*slog.Logger, error) {
+func New(cfg config.LogConfig, output io.Writer, environment config.Environment) (*slog.Logger, error) {
 	level, err := ParseLevel(cfg.Level)
 	if err != nil {
 		return nil, err
@@ -32,9 +32,9 @@ func New(cfg config.LogConfig, output io.Writer, environment string) (*slog.Logg
 	options := &slog.HandlerOptions{Level: level}
 	var handler slog.Handler
 	switch cfg.Format {
-	case "json":
+	case config.LogFormatJSON:
 		handler = slog.NewJSONHandler(output, options)
-	case "text":
+	case config.LogFormatText:
 		handler = slog.NewTextHandler(output, options)
 	default:
 		return nil, fmt.Errorf("unsupported log format %q", cfg.Format)
@@ -42,6 +42,6 @@ func New(cfg config.LogConfig, output io.Writer, environment string) (*slog.Logg
 
 	return slog.New(handler).With(
 		"service", "content-platform",
-		"environment", environment,
+		"environment", string(environment),
 	), nil
 }
