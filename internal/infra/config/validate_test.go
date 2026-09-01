@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestHTTPConfigValidate(t *testing.T) {
@@ -168,6 +169,77 @@ func TestRedisConfigValidate(t *testing.T) {
 	}
 }
 
+func TestAuthConfigValidate(t *testing.T) {
+	const exact32ByteUTF8Secret = "你好世界你好世界你好ab"
+	if got := len(exact32ByteUTF8Secret); got != 32 {
+		t.Fatalf("test secret byte length = %d, want 32", got)
+	}
+	if got := utf8.RuneCountInString(exact32ByteUTF8Secret); got >= 32 {
+		t.Fatalf("test secret rune count = %d, want fewer than 32", got)
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*AuthConfig)
+		wantErr string
+	}{
+		{name: "32 byte secret", mutate: func(*AuthConfig) {}},
+		{name: "32 byte multibyte secret", mutate: func(c *AuthConfig) { c.JWTSecret = exact32ByteUTF8Secret }},
+		{name: "missing secret", mutate: func(c *AuthConfig) { c.JWTSecret = "" }, wantErr: "AUTH_JWT_SECRET"},
+		{name: "31 byte secret", mutate: func(c *AuthConfig) { c.JWTSecret = "1234567890123456789012345678901" }, wantErr: "AUTH_JWT_SECRET"},
+		{name: "blank issuer", mutate: func(c *AuthConfig) { c.JWTIssuer = " " }, wantErr: "AUTH_JWT_ISSUER"},
+		{name: "blank audience", mutate: func(c *AuthConfig) { c.JWTAudience = " " }, wantErr: "AUTH_JWT_AUDIENCE"},
+		{name: "zero access TTL", mutate: func(c *AuthConfig) { c.AccessTokenTTL = 0 }, wantErr: "AUTH_ACCESS_TOKEN_TTL"},
+		{name: "negative access TTL", mutate: func(c *AuthConfig) { c.AccessTokenTTL = -time.Second }, wantErr: "AUTH_ACCESS_TOKEN_TTL"},
+		{name: "zero refresh TTL", mutate: func(c *AuthConfig) { c.RefreshTokenTTL = 0 }, wantErr: "AUTH_REFRESH_TOKEN_TTL must be greater than zero"},
+		{name: "negative refresh TTL", mutate: func(c *AuthConfig) { c.RefreshTokenTTL = -time.Second }, wantErr: "AUTH_REFRESH_TOKEN_TTL must be greater than zero"},
+		{name: "refresh equals access", mutate: func(c *AuthConfig) { c.RefreshTokenTTL = c.AccessTokenTTL }, wantErr: "AUTH_REFRESH_TOKEN_TTL must be greater than AUTH_ACCESS_TOKEN_TTL"},
+		{name: "refresh shorter than access", mutate: func(c *AuthConfig) { c.AccessTokenTTL = 2 * time.Hour; c.RefreshTokenTTL = time.Hour }, wantErr: "AUTH_REFRESH_TOKEN_TTL must be greater than AUTH_ACCESS_TOKEN_TTL"},
+		{name: "bcrypt cost 9", mutate: func(c *AuthConfig) { c.BcryptCost = 9 }, wantErr: "AUTH_BCRYPT_COST"},
+		{name: "bcrypt cost 10", mutate: func(c *AuthConfig) { c.BcryptCost = 10 }},
+		{name: "bcrypt cost 15", mutate: func(c *AuthConfig) { c.BcryptCost = 15 }},
+		{name: "bcrypt cost 16", mutate: func(c *AuthConfig) { c.BcryptCost = 16 }, wantErr: "AUTH_BCRYPT_COST"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validAuthConfig()
+			tt.mutate(&cfg)
+
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestAuthConfigValidateDoesNotExposeJWTSecret(t *testing.T) {
+	const (
+		secretMarker = "jwt-secret-do-not-log"
+		secret       = secretMarker + "-123456"
+	)
+	cfg := validAuthConfig()
+	cfg.JWTSecret = secret
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() expected error")
+	}
+	if !strings.Contains(err.Error(), "AUTH_JWT_SECRET") {
+		t.Fatalf("Validate() error = %v, want AUTH_JWT_SECRET", err)
+	}
+	if strings.Contains(err.Error(), secretMarker) {
+		t.Fatal("Validate() exposed AUTH_JWT_SECRET")
+	}
+}
+
 func TestLogConfigValidate(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -200,9 +272,10 @@ func TestLogConfigValidate(t *testing.T) {
 
 func TestConfigValidateReturnsFirstErrorInStableOrder(t *testing.T) {
 	tests := []struct {
-		name    string
-		mutate  func(*Config)
-		wantErr string
+		name     string
+		mutate   func(*Config)
+		wantErr  string
+		laterErr string
 	}{
 		{
 			name: "environment before HTTP",
@@ -210,7 +283,8 @@ func TestConfigValidateReturnsFirstErrorInStableOrder(t *testing.T) {
 				c.Environment = ""
 				c.HTTP.Address = "invalid"
 			},
-			wantErr: "APP_ENV",
+			wantErr:  "APP_ENV",
+			laterErr: "HTTP_ADDR",
 		},
 		{
 			name: "HTTP before database",
@@ -218,7 +292,8 @@ func TestConfigValidateReturnsFirstErrorInStableOrder(t *testing.T) {
 				c.HTTP.Address = "invalid"
 				c.Database.URL = ""
 			},
-			wantErr: "HTTP_ADDR",
+			wantErr:  "HTTP_ADDR",
+			laterErr: "DATABASE_URL",
 		},
 		{
 			name: "database before Redis",
@@ -226,15 +301,26 @@ func TestConfigValidateReturnsFirstErrorInStableOrder(t *testing.T) {
 				c.Database.URL = ""
 				c.Redis.Address = "invalid"
 			},
-			wantErr: "DATABASE_URL",
+			wantErr:  "DATABASE_URL",
+			laterErr: "REDIS_ADDR",
 		},
 		{
-			name: "Redis before log",
+			name: "Redis before auth",
 			mutate: func(c *Config) {
 				c.Redis.Address = "invalid"
+				c.Auth.JWTSecret = ""
+			},
+			wantErr:  "REDIS_ADDR",
+			laterErr: "AUTH_JWT_SECRET",
+		},
+		{
+			name: "auth before log",
+			mutate: func(c *Config) {
+				c.Auth.JWTSecret = ""
 				c.Log.Level = LogLevel("verbose")
 			},
-			wantErr: "REDIS_ADDR",
+			wantErr:  "AUTH_JWT_SECRET",
+			laterErr: "LOG_LEVEL",
 		},
 	}
 
@@ -246,6 +332,9 @@ func TestConfigValidateReturnsFirstErrorInStableOrder(t *testing.T) {
 			err := cfg.Validate()
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+			if strings.Contains(err.Error(), tt.laterErr) {
+				t.Fatalf("Validate() error = %v, unexpectedly contains later error %q", err, tt.laterErr)
 			}
 		})
 	}
@@ -260,12 +349,24 @@ func validRedisConfig() RedisConfig {
 	}
 }
 
+func validAuthConfig() AuthConfig {
+	return AuthConfig{
+		JWTSecret:       validJWTSecret,
+		JWTIssuer:       "content-platform",
+		JWTAudience:     "content-platform-api",
+		AccessTokenTTL:  15 * time.Minute,
+		RefreshTokenTTL: 720 * time.Hour,
+		BcryptCost:      12,
+	}
+}
+
 func validConfig() Config {
 	return Config{
 		Environment: EnvironmentLocal,
 		HTTP:        validHTTPConfig(),
 		Database:    validDatabaseConfig(),
 		Redis:       validRedisConfig(),
+		Auth:        validAuthConfig(),
 		Log: LogConfig{
 			Level:  LogLevelInfo,
 			Format: LogFormatJSON,
