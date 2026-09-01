@@ -13,6 +13,7 @@ var (
 	ErrValidationFailed            = errors.New("validation failed")
 	ErrEmailAlreadyRegistered      = errors.New("email already registered")
 	ErrInvalidCredentials          = errors.New("invalid credentials")
+	ErrInvalidRefreshToken         = errors.New("invalid refresh token")
 )
 
 type ValidationField string

@@ -30,6 +30,155 @@ type LoginResult struct {
 	User             domain.UserView
 }
 
+type RefreshInput struct {
+	RefreshToken string
+	RequestID    string
+}
+
+type RefreshResult struct {
+	TokenType        string
+	AccessToken      string
+	ExpiresIn        int64
+	RefreshToken     string
+	RefreshExpiresAt time.Time
+}
+
+func (s *Service) Refresh(ctx context.Context, input RefreshInput) (RefreshResult, error) {
+	sessionID, candidateHash, err := s.refreshTokenGenerator.Parse(input.RefreshToken)
+	if err != nil {
+		return RefreshResult{}, ErrInvalidRefreshToken
+	}
+	if sessionID <= 0 {
+		return RefreshResult{}, ErrInvalidRefreshToken
+	}
+	if ctx == nil {
+		return RefreshResult{}, newInternalError(nil)
+	}
+	if err := ctx.Err(); err != nil {
+		return RefreshResult{}, newInternalError(err)
+	}
+
+	ownerID, err := s.repository.FindSessionOwner(ctx, sessionID)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return RefreshResult{}, newInternalError(ctxErr)
+	}
+	if err != nil {
+		return RefreshResult{}, refreshLookupError(err)
+	}
+	if ownerID <= 0 {
+		return RefreshResult{}, newInternalError(nil)
+	}
+
+	result := RefreshResult{}
+	err = s.repository.WithinTx(ctx, func(txCtx context.Context, tx Tx) error {
+		lockedUsers, err := tx.LockUsers(txCtx, []int64{ownerID})
+		if err != nil {
+			return refreshLookupError(err)
+		}
+		if len(lockedUsers) == 0 {
+			return ErrInvalidRefreshToken
+		}
+		if len(lockedUsers) != 1 {
+			return newInternalError(nil)
+		}
+		user := lockedUsers[0]
+		if user.ID != ownerID {
+			return ErrInvalidRefreshToken
+		}
+
+		session, err := tx.LockSession(txCtx, sessionID)
+		if err != nil {
+			return refreshLookupError(err)
+		}
+		if session.ID != sessionID || session.UserID != ownerID || session.UserID != user.ID {
+			return ErrInvalidRefreshToken
+		}
+		if session.RevokedAt != nil || len(session.TokenHash) != len(candidateHash) {
+			return ErrInvalidRefreshToken
+		}
+		var storedHash [32]byte
+		copy(storedHash[:], session.TokenHash)
+		if !s.refreshTokenGenerator.Match(storedHash, candidateHash) {
+			return ErrInvalidRefreshToken
+		}
+		if user.DeletedAt != nil || !user.Status.CanLogin() {
+			return ErrInvalidRefreshToken
+		}
+		if user.Status == domain.StatusMuted && user.MutedUntil == nil {
+			return newInternalError(nil)
+		}
+		now, err := s.now()
+		if err != nil {
+			return err
+		}
+		sessionExpiresAt := domain.NormalizeTime(session.ExpiresAt)
+		if !validLoginExpiry(now, sessionExpiresAt) {
+			return ErrInvalidRefreshToken
+		}
+		accessExpiresAt := domain.NormalizeTime(now.Add(s.accessTokenTTL))
+		if sessionExpiresAt.Before(accessExpiresAt) {
+			accessExpiresAt = sessionExpiresAt
+		}
+		if !validLoginExpiry(now, accessExpiresAt) {
+			return newInternalError(nil)
+		}
+
+		user, pendingMuteAudit, err := recoverExpiredMuteForAuth(txCtx, tx, user, now, input.RequestID)
+		if err != nil {
+			return err
+		}
+
+		refreshSecret, refreshHash, err := s.refreshTokenGenerator.Generate()
+		if err != nil {
+			return newInternalError(err)
+		}
+		jwtID, err := s.accessTokenManager.GenerateJWTID()
+		if err != nil {
+			return newInternalError(err)
+		}
+		accessToken, err := s.accessTokenManager.Sign(user.ID, session.ID, now, accessExpiresAt, jwtID)
+		if err != nil {
+			return newInternalError(err)
+		}
+		refreshToken, err := s.refreshTokenGenerator.Format(session.ID, refreshSecret)
+		if err != nil {
+			return newInternalError(err)
+		}
+		if err := tx.RotateSessionToken(txCtx, session.ID, refreshHash); err != nil {
+			return newInternalError(err)
+		}
+		if pendingMuteAudit != nil {
+			if err := tx.InsertAudit(txCtx, *pendingMuteAudit); err != nil {
+				return newInternalError(err)
+			}
+		}
+
+		result = RefreshResult{
+			TokenType:        "Bearer",
+			AccessToken:      accessToken,
+			ExpiresIn:        accessExpiresAt.Unix() - now.Unix(),
+			RefreshToken:     refreshToken,
+			RefreshExpiresAt: sessionExpiresAt,
+		}
+		return nil
+	})
+	if err != nil {
+		if err == ErrInvalidRefreshToken {
+			return RefreshResult{}, ErrInvalidRefreshToken
+		}
+		return RefreshResult{}, newInternalError(err)
+	}
+
+	return result, nil
+}
+
+func refreshLookupError(err error) error {
+	if internalContextMarker(err) == nil && !errors.Is(err, ErrInternal) && errors.Is(err, ErrNotFound) {
+		return ErrInvalidRefreshToken
+	}
+	return newInternalError(err)
+}
+
 type loginCredentialOutcome uint8
 
 const (
@@ -130,37 +279,9 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (LoginResult, err
 			return newInternalError(nil)
 		}
 
-		var pendingMuteAudit *AuditEntry
-		if user.Status == domain.StatusMuted {
-			if user.MutedUntil == nil {
-				return newInternalError(nil)
-			}
-			if !user.MutedUntil.After(now) {
-				oldMutedUntil := *user.MutedUntil
-				recovered, changed, err := tx.RecoverExpiredMute(txCtx, user.ID, now)
-				if err != nil {
-					return newInternalError(err)
-				}
-				if !changed || !validRecoveredLoginUser(recovered, user.ID, credential.PasswordHash, now) {
-					return newInternalError(nil)
-				}
-				user = recovered
-				pendingMuteAudit = &AuditEntry{
-					ActorType:  AuditActorSystem,
-					ActorID:    nil,
-					Action:     "user.mute_expired",
-					TargetType: "user",
-					TargetID:   user.ID,
-					Detail: map[string]any{
-						"old_status":      domain.StatusMuted,
-						"new_status":      domain.StatusActive,
-						"old_muted_until": oldMutedUntil,
-						"new_muted_until": nil,
-						"request_id":      input.RequestID,
-					},
-					CreatedAt: now,
-				}
-			}
+		user, pendingMuteAudit, err := recoverExpiredMuteForAuth(txCtx, tx, user, now, input.RequestID)
+		if err != nil {
+			return err
 		}
 
 		refreshSecret, refreshHash, err := s.refreshTokenGenerator.Generate()
@@ -236,7 +357,50 @@ func validLoginExpiry(now, expiresAt time.Time) bool {
 	return year >= 0 && year <= 9999
 }
 
-func validRecoveredLoginUser(user domain.User, userID int64, passwordHash string, now time.Time) bool {
+func recoverExpiredMuteForAuth(
+	ctx context.Context,
+	tx Tx,
+	user domain.User,
+	now time.Time,
+	requestID string,
+) (domain.User, *AuditEntry, error) {
+	if user.Status != domain.StatusMuted {
+		return user, nil, nil
+	}
+	if user.MutedUntil == nil {
+		return domain.User{}, nil, newInternalError(nil)
+	}
+	if user.MutedUntil.After(now) {
+		return user, nil, nil
+	}
+
+	oldMutedUntil := *user.MutedUntil
+	recovered, changed, err := tx.RecoverExpiredMute(ctx, user.ID, now)
+	if err != nil {
+		return domain.User{}, nil, newInternalError(err)
+	}
+	if !changed || !validRecoveredAuthUser(recovered, user.ID, user.PasswordHash, now) {
+		return domain.User{}, nil, newInternalError(nil)
+	}
+	audit := AuditEntry{
+		ActorType:  AuditActorSystem,
+		ActorID:    nil,
+		Action:     "user.mute_expired",
+		TargetType: "user",
+		TargetID:   recovered.ID,
+		Detail: map[string]any{
+			"old_status":      domain.StatusMuted,
+			"new_status":      domain.StatusActive,
+			"old_muted_until": oldMutedUntil,
+			"new_muted_until": nil,
+			"request_id":      requestID,
+		},
+		CreatedAt: now,
+	}
+	return recovered, &audit, nil
+}
+
+func validRecoveredAuthUser(user domain.User, userID int64, passwordHash string, now time.Time) bool {
 	return user.ID == userID &&
 		user.PasswordHash == passwordHash &&
 		user.Status == domain.StatusActive &&
