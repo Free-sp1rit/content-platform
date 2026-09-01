@@ -18,6 +18,25 @@ func TestValidateCommand(t *testing.T) {
 	}
 }
 
+func TestGooseCommand(t *testing.T) {
+	for _, testCase := range []struct {
+		command string
+		want    string
+	}{
+		{command: "down-one", want: "down"},
+		{command: "up", want: "up"},
+		{command: "status", want: "status"},
+		{command: "version", want: "version"},
+		{command: "reset", want: "reset"},
+	} {
+		t.Run(testCase.command, func(t *testing.T) {
+			if got := gooseCommand(testCase.command); got != testCase.want {
+				t.Fatalf("gooseCommand(%q) = %q, want %q", testCase.command, got, testCase.want)
+			}
+		})
+	}
+}
+
 func TestSlogLoggerProducesStructuredOutput(t *testing.T) {
 	var output bytes.Buffer
 	adapter := slogLogger{logger: slog.New(slog.NewJSONHandler(&output, nil))}
