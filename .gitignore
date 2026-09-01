@@ -8,6 +8,9 @@
 # Go workspace
 go.work
 
+# Local isolated feature worktrees
+.worktrees/
+
 # Env
 .env
 .env.*
