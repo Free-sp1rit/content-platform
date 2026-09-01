@@ -1,9 +1,25 @@
 package service
 
 import (
+	"errors"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestNewReturnsServiceAndError(t *testing.T) {
+	newType := reflect.TypeOf(New)
+	if newType.NumOut() != 2 {
+		t.Fatalf("New output count = %d, want 2", newType.NumOut())
+	}
+	if newType.Out(0) != reflect.TypeOf((*Service)(nil)) {
+		t.Fatal("New first output is not *Service")
+	}
+	if newType.Out(1) != reflect.TypeOf((*error)(nil)).Elem() {
+		t.Fatal("New second output is not error")
+	}
+}
 
 func TestNewStoresDependenciesAndConfiguration(t *testing.T) {
 	repository := repositoryPortStub{}
@@ -23,7 +39,10 @@ func TestNewStoresDependenciesAndConfiguration(t *testing.T) {
 		RefreshTokenTTL: 30 * 24 * time.Hour,
 	}
 
-	service := New(dependencies, configuration)
+	service, err := New(dependencies, configuration)
+	if err != nil {
+		t.Fatalf("New() returned error type %T for valid configuration", err)
+	}
 
 	if service.repository != repository {
 		t.Fatal("New() did not retain Repository")
@@ -45,6 +64,127 @@ func TestNewStoresDependenciesAndConfiguration(t *testing.T) {
 	}
 	if service.refreshTokenTTL != configuration.RefreshTokenTTL {
 		t.Fatalf("New() refresh token TTL = %v, want %v", service.refreshTokenTTL, configuration.RefreshTokenTTL)
+	}
+}
+
+func TestNewRejectsInvalidDependenciesAndConfiguration(t *testing.T) {
+	validDependencies := serviceTestDependencies()
+	validConfig := serviceTestConfig()
+
+	missingRepository := validDependencies
+	missingRepository.Repository = nil
+	var typedNilRepository *repositoryPortStub
+	typedNilRepositoryDependencies := validDependencies
+	typedNilRepositoryDependencies.Repository = typedNilRepository
+
+	missingPasswordHasher := validDependencies
+	missingPasswordHasher.PasswordHasher = nil
+	var typedNilPasswordHasher *passwordHasherPortStub
+	typedNilPasswordHasherDependencies := validDependencies
+	typedNilPasswordHasherDependencies.PasswordHasher = typedNilPasswordHasher
+
+	missingAccessTokens := validDependencies
+	missingAccessTokens.AccessTokenManager = nil
+	var typedNilAccessTokens *accessTokenManagerPortStub
+	typedNilAccessTokenDependencies := validDependencies
+	typedNilAccessTokenDependencies.AccessTokenManager = typedNilAccessTokens
+
+	missingRefreshTokens := validDependencies
+	missingRefreshTokens.RefreshTokenGenerator = nil
+	var typedNilRefreshTokens *refreshTokenGeneratorPortStub
+	typedNilRefreshTokenDependencies := validDependencies
+	typedNilRefreshTokenDependencies.RefreshTokenGenerator = typedNilRefreshTokens
+
+	missingClock := validDependencies
+	missingClock.Clock = nil
+	var typedNilClock *clockPortStub
+	typedNilClockDependencies := validDependencies
+	typedNilClockDependencies.Clock = typedNilClock
+
+	tests := []struct {
+		name         string
+		dependencies Dependencies
+		config       Config
+	}{
+		{name: "missing repository", dependencies: missingRepository, config: validConfig},
+		{name: "typed nil repository", dependencies: typedNilRepositoryDependencies, config: validConfig},
+		{name: "missing password hasher", dependencies: missingPasswordHasher, config: validConfig},
+		{name: "typed nil password hasher", dependencies: typedNilPasswordHasherDependencies, config: validConfig},
+		{name: "missing access token manager", dependencies: missingAccessTokens, config: validConfig},
+		{name: "typed nil access token manager", dependencies: typedNilAccessTokenDependencies, config: validConfig},
+		{name: "missing refresh token generator", dependencies: missingRefreshTokens, config: validConfig},
+		{name: "typed nil refresh token generator", dependencies: typedNilRefreshTokenDependencies, config: validConfig},
+		{name: "missing clock", dependencies: missingClock, config: validConfig},
+		{name: "typed nil clock", dependencies: typedNilClockDependencies, config: validConfig},
+		{
+			name:         "zero access token TTL",
+			dependencies: validDependencies,
+			config:       Config{AccessTokenTTL: 0, RefreshTokenTTL: 30 * 24 * time.Hour},
+		},
+		{
+			name:         "negative access token TTL",
+			dependencies: validDependencies,
+			config:       Config{AccessTokenTTL: -time.Second, RefreshTokenTTL: 30 * 24 * time.Hour},
+		},
+		{
+			name:         "refresh token TTL equals access token TTL",
+			dependencies: validDependencies,
+			config:       Config{AccessTokenTTL: 15 * time.Minute, RefreshTokenTTL: 15 * time.Minute},
+		},
+		{
+			name:         "refresh token TTL below access token TTL",
+			dependencies: validDependencies,
+			config:       Config{AccessTokenTTL: 15 * time.Minute, RefreshTokenTTL: 14 * time.Minute},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service, err := New(tt.dependencies, tt.config)
+
+			if service != nil {
+				t.Fatal("New() returned a service for invalid configuration")
+			}
+			if !errors.Is(err, ErrInvalidServiceConfiguration) {
+				t.Fatalf("New() error type = %T, want ErrInvalidServiceConfiguration", err)
+			}
+			if err.Error() != ErrInvalidServiceConfiguration.Error() {
+				t.Fatal("New() did not return the stable safe configuration message")
+			}
+			assertServiceConfigurationErrorOmitsDetails(t, err, tt.config)
+		})
+	}
+}
+
+func serviceTestDependencies() Dependencies {
+	return Dependencies{
+		Repository:            repositoryPortStub{},
+		PasswordHasher:        &passwordHasherPortStub{},
+		AccessTokenManager:    &accessTokenManagerPortStub{},
+		RefreshTokenGenerator: &refreshTokenGeneratorPortStub{},
+		Clock:                 &clockPortStub{},
+	}
+}
+
+func serviceTestConfig() Config {
+	return Config{
+		AccessTokenTTL:  15 * time.Minute,
+		RefreshTokenTTL: 30 * 24 * time.Hour,
+	}
+}
+
+func assertServiceConfigurationErrorOmitsDetails(t *testing.T, err error, config Config) {
+	t.Helper()
+
+	message := strings.ToLower(err.Error())
+	for _, forbidden := range []string{
+		"repository", "password", "access token", "refresh token", "clock",
+		strings.ToLower(config.AccessTokenTTL.String()),
+		strings.ToLower(config.RefreshTokenTTL.String()),
+	} {
+		if forbidden != "" && strings.Contains(message, forbidden) {
+			t.Fatal("New() error exposed dependency identity or configuration value")
+		}
 	}
 }
 

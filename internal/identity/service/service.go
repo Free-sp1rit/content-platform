@@ -1,6 +1,9 @@
 package service
 
-import "time"
+import (
+	"reflect"
+	"time"
+)
 
 type Dependencies struct {
 	Repository            Repository
@@ -25,7 +28,17 @@ type Service struct {
 	refreshTokenTTL       time.Duration
 }
 
-func New(dependencies Dependencies, config Config) *Service {
+func New(dependencies Dependencies, config Config) (*Service, error) {
+	if isNilDependency(dependencies.Repository) ||
+		isNilDependency(dependencies.PasswordHasher) ||
+		isNilDependency(dependencies.AccessTokenManager) ||
+		isNilDependency(dependencies.RefreshTokenGenerator) ||
+		isNilDependency(dependencies.Clock) ||
+		config.AccessTokenTTL <= 0 ||
+		config.RefreshTokenTTL <= config.AccessTokenTTL {
+		return nil, ErrInvalidServiceConfiguration
+	}
+
 	return &Service{
 		repository:            dependencies.Repository,
 		passwordHasher:        dependencies.PasswordHasher,
@@ -34,5 +47,18 @@ func New(dependencies Dependencies, config Config) *Service {
 		clock:                 dependencies.Clock,
 		accessTokenTTL:        config.AccessTokenTTL,
 		refreshTokenTTL:       config.RefreshTokenTTL,
+	}, nil
+}
+
+func isNilDependency(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
 	}
 }
