@@ -127,6 +127,26 @@ func TestNewRejectsInvalidDependenciesAndConfiguration(t *testing.T) {
 			config:       Config{AccessTokenTTL: -time.Second, RefreshTokenTTL: 30 * 24 * time.Hour},
 		},
 		{
+			name:         "access token TTL below one second",
+			dependencies: validDependencies,
+			config:       Config{AccessTokenTTL: 500 * time.Millisecond, RefreshTokenTTL: 2 * time.Second},
+		},
+		{
+			name:         "access token TTL not whole seconds",
+			dependencies: validDependencies,
+			config:       Config{AccessTokenTTL: 1500 * time.Millisecond, RefreshTokenTTL: 3 * time.Second},
+		},
+		{
+			name:         "subsecond access and refresh token TTLs",
+			dependencies: validDependencies,
+			config:       Config{AccessTokenTTL: 250 * time.Millisecond, RefreshTokenTTL: 500 * time.Millisecond},
+		},
+		{
+			name:         "refresh token TTL not whole seconds",
+			dependencies: validDependencies,
+			config:       Config{AccessTokenTTL: time.Second, RefreshTokenTTL: 1500 * time.Millisecond},
+		},
+		{
 			name:         "refresh token TTL equals access token TTL",
 			dependencies: validDependencies,
 			config:       Config{AccessTokenTTL: 15 * time.Minute, RefreshTokenTTL: 15 * time.Minute},
@@ -153,6 +173,20 @@ func TestNewRejectsInvalidDependenciesAndConfiguration(t *testing.T) {
 			}
 			assertServiceConfigurationErrorOmitsDetails(t, err, tt.config)
 		})
+	}
+}
+
+func TestNewAcceptsWholeSecondTTLBoundary(t *testing.T) {
+	service, err := New(serviceTestDependencies(), Config{
+		AccessTokenTTL:  time.Second,
+		RefreshTokenTTL: 2 * time.Second,
+	})
+
+	if err != nil {
+		t.Fatalf("New() returned error type %T for whole-second TTL boundary", err)
+	}
+	if service == nil || service.accessTokenTTL != time.Second || service.refreshTokenTTL != 2*time.Second {
+		t.Fatal("New() did not retain the valid whole-second TTL boundary")
 	}
 }
 
@@ -190,10 +224,12 @@ func assertServiceConfigurationErrorOmitsDetails(t *testing.T, err error, config
 
 type passwordHasherPortStub struct{}
 
-func (*passwordHasherPortStub) Hash(string) (string, error)  { return "", nil }
-func (*passwordHasherPortStub) Compare(string, string) error { return nil }
-func (*passwordHasherPortStub) DummyHash() string            { return "" }
-func (*passwordHasherPortStub) DummyCandidate() string       { return "" }
+func (*passwordHasherPortStub) Hash(string) (string, error) { return "", nil }
+func (*passwordHasherPortStub) Compare(string, string) (bool, error) {
+	return false, nil
+}
+func (*passwordHasherPortStub) DummyHash() string      { return "" }
+func (*passwordHasherPortStub) DummyCandidate() string { return "" }
 
 type accessTokenManagerPortStub struct{}
 

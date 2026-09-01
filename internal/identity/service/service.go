@@ -34,7 +34,8 @@ func New(dependencies Dependencies, config Config) (*Service, error) {
 		isNilDependency(dependencies.AccessTokenManager) ||
 		isNilDependency(dependencies.RefreshTokenGenerator) ||
 		isNilDependency(dependencies.Clock) ||
-		config.AccessTokenTTL <= 0 ||
+		!validTokenTTL(config.AccessTokenTTL) ||
+		!validTokenTTL(config.RefreshTokenTTL) ||
 		config.RefreshTokenTTL <= config.AccessTokenTTL {
 		return nil, ErrInvalidServiceConfiguration
 	}
@@ -48,6 +49,10 @@ func New(dependencies Dependencies, config Config) (*Service, error) {
 		accessTokenTTL:        config.AccessTokenTTL,
 		refreshTokenTTL:       config.RefreshTokenTTL,
 	}, nil
+}
+
+func validTokenTTL(value time.Duration) bool {
+	return value >= time.Second && value%time.Second == 0
 }
 
 func isNilDependency(value any) bool {

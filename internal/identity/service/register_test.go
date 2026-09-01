@@ -699,9 +699,9 @@ func (h *registerPasswordHasherSpy) Hash(candidate string) (string, error) {
 	return h.hashResult, h.hashErr
 }
 
-func (h *registerPasswordHasherSpy) Compare(string, string) error {
+func (h *registerPasswordHasherSpy) Compare(string, string) (bool, error) {
 	h.compareCalls++
-	return nil
+	return false, nil
 }
 
 func (h *registerPasswordHasherSpy) DummyHash() string {

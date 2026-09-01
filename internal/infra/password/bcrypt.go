@@ -9,10 +9,10 @@ import (
 const dummyCandidate = "content-platform-dummy-password"
 
 var (
-	ErrInvalidCost      = errors.New("bcrypt cost must be between 10 and 15")
-	ErrPasswordTooLong  = errors.New("password exceeds bcrypt 72-byte limit")
-	ErrPasswordMismatch = errors.New("password comparison failed")
-	ErrInvalidHash      = errors.New("password hash is invalid")
+	ErrInvalidCost     = errors.New("bcrypt cost must be between 10 and 15")
+	ErrPasswordTooLong = errors.New("password exceeds bcrypt 72-byte limit")
+	ErrInvalidHash     = errors.New("password hash is invalid")
+	errDummyCompare    = errors.New("bcrypt dummy comparison failed")
 )
 
 type Bcrypt struct {
@@ -42,22 +42,35 @@ func (b *Bcrypt) Hash(candidate string) (string, error) {
 	return string(hash), nil
 }
 
-func (b *Bcrypt) Compare(hash, candidate string) error {
+func (b *Bcrypt) Compare(hash, candidate string) (bool, error) {
 	if len(candidate) > 72 {
-		return ErrPasswordTooLong
+		return b.rejectAfterDummy(ErrPasswordTooLong)
 	}
 	cost, err := bcrypt.Cost([]byte(hash))
 	if err != nil || cost < 10 || cost > 15 {
-		return ErrInvalidHash
+		return b.rejectAfterDummy(ErrInvalidHash)
+	}
+	// The configured cost is a persistent account-availability invariant.
+	// A stored hash at another otherwise valid cost fails as an ordinary
+	// mismatch after consuming the current configured dummy workload.
+	if cost != b.cost {
+		return b.rejectAfterDummy(nil)
 	}
 	err = bcrypt.CompareHashAndPassword([]byte(hash), []byte(candidate))
 	if err == nil {
-		return nil
+		return true, nil
 	}
 	if errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
-		return ErrPasswordMismatch
+		return false, nil
 	}
-	return ErrInvalidHash
+	return b.rejectAfterDummy(ErrInvalidHash)
+}
+
+func (b *Bcrypt) rejectAfterDummy(resultErr error) (bool, error) {
+	if err := bcrypt.CompareHashAndPassword([]byte(b.dummyHash), []byte(dummyCandidate)); err != nil {
+		return false, errDummyCompare
+	}
+	return false, resultErr
 }
 
 func (b *Bcrypt) DummyHash() string {

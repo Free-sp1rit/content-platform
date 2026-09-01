@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -83,8 +84,20 @@ func (c AuthConfig) Validate() error {
 	if c.AccessTokenTTL <= 0 {
 		return fmt.Errorf("AUTH_ACCESS_TOKEN_TTL must be greater than zero")
 	}
+	if c.AccessTokenTTL < time.Second {
+		return fmt.Errorf("AUTH_ACCESS_TOKEN_TTL must be at least one second")
+	}
+	if c.AccessTokenTTL%time.Second != 0 {
+		return fmt.Errorf("AUTH_ACCESS_TOKEN_TTL must use whole-second precision")
+	}
 	if c.RefreshTokenTTL <= 0 {
 		return fmt.Errorf("AUTH_REFRESH_TOKEN_TTL must be greater than zero")
+	}
+	if c.RefreshTokenTTL < time.Second {
+		return fmt.Errorf("AUTH_REFRESH_TOKEN_TTL must be at least one second")
+	}
+	if c.RefreshTokenTTL%time.Second != 0 {
+		return fmt.Errorf("AUTH_REFRESH_TOKEN_TTL must use whole-second precision")
 	}
 	if c.RefreshTokenTTL <= c.AccessTokenTTL {
 		return fmt.Errorf("AUTH_REFRESH_TOKEN_TTL must be greater than AUTH_ACCESS_TOKEN_TTL")

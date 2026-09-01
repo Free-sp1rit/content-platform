@@ -65,6 +65,40 @@ set +a
 
 不要记录完整 `Config`，也不要单独记录数据库 URL 或 Redis 密码。配置类型为 `slog` 提供了脱敏表示作为误用防护，但这不替代字段级日志设计和代码审查。
 
+### bcrypt cost 部署约束
+
+`AUTH_BCRYPT_COST` 允许 `10..15`，默认值为 `12`。只能在 `users` 表为空、创建首个用户之前选择该值；首个用户创建后，该值即为不可变的持久化契约。同一环境的所有实例必须始终使用相同值，普通 rolling deploy、扩缩容和回滚均不得改变它。
+
+bcrypt 不能在没有用户明文密码的情况下离线提高已有 hash 的 cost。未来如需升级 cost，必须另行设计受控的密码重置或凭据升级流程；当前实现不支持 rehash。若实例配置与存量 hash 的 cost 不一致，password adapter 会执行当前配置 cost 的 dummy workload，并将其作为普通凭据不匹配安全失败。这是违反部署不变量时的保护行为，不是迁移机制。
+
+部署、扩缩容或回滚前先导入目标环境的 `DATABASE_URL` 和 `AUTH_BCRYPT_COST`，再执行以下检查。空 `users` 表可以选择任意 `10..15` 的 cost；非空表只能继续使用所有现存密码 hash 已采用的同一值：
+
+```bash
+case "$AUTH_BCRYPT_COST" in
+  10|11|12|13|14|15) ;;
+  *) echo 'AUTH_BCRYPT_COST must be between 10 and 15' >&2; exit 1 ;;
+esac
+
+incompatible_password_hashes="$(
+  psql "$DATABASE_URL" \
+    --set=ON_ERROR_STOP=1 \
+    --set=bcrypt_cost="$AUTH_BCRYPT_COST" \
+    --tuples-only \
+    --no-align <<'SQL'
+SELECT count(*) AS incompatible_password_hashes
+FROM users
+WHERE split_part(password_hash, '$', 3) <> lpad(:'bcrypt_cost', 2, '0');
+SQL
+)" || exit 1
+
+if [ "$incompatible_password_hashes" != "0" ]; then
+  echo "deployment blocked: ${incompatible_password_hashes} password hash(es) do not use AUTH_BCRYPT_COST=${AUTH_BCRYPT_COST}" >&2
+  exit 1
+fi
+```
+
+查询结果必须为 `0`；任何非零结果都必须停止部署。不要通过普通 rolling deploy 修改 cost。
+
 ## 准备依赖
 
 M1 不提供 Docker Compose。请使用本机服务或自行管理的容器准备：

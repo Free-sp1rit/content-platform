@@ -61,6 +61,11 @@ func TestAuthConfigValidate(t *testing.T) {
 		{name: "blank issuer", mutate: func(c *AuthConfig) { c.JWTIssuer = " " }, wantErr: "AUTH_JWT_ISSUER"},
 		{name: "blank audience", mutate: func(c *AuthConfig) { c.JWTAudience = " " }, wantErr: "AUTH_JWT_AUDIENCE"},
 		{name: "zero access TTL", mutate: func(c *AuthConfig) { c.AccessTokenTTL = 0 }, wantErr: "AUTH_ACCESS_TOKEN_TTL"},
+		{name: "access TTL below one second", mutate: func(c *AuthConfig) { c.AccessTokenTTL = 500 * time.Millisecond }, wantErr: "AUTH_ACCESS_TOKEN_TTL"},
+		{name: "access TTL not whole seconds", mutate: func(c *AuthConfig) { c.AccessTokenTTL = 1500 * time.Millisecond }, wantErr: "AUTH_ACCESS_TOKEN_TTL"},
+		{name: "refresh TTL below one second", mutate: func(c *AuthConfig) { c.RefreshTokenTTL = 500 * time.Millisecond }, wantErr: "AUTH_REFRESH_TOKEN_TTL"},
+		{name: "refresh TTL not whole seconds", mutate: func(c *AuthConfig) { c.AccessTokenTTL = time.Second; c.RefreshTokenTTL = 1500 * time.Millisecond }, wantErr: "AUTH_REFRESH_TOKEN_TTL"},
+		{name: "one and two second TTL boundary", mutate: func(c *AuthConfig) { c.AccessTokenTTL = time.Second; c.RefreshTokenTTL = 2 * time.Second }},
 		{name: "refresh not longer", mutate: func(c *AuthConfig) { c.RefreshTokenTTL = c.AccessTokenTTL }, wantErr: "AUTH_REFRESH_TOKEN_TTL"},
 		{name: "cost below range", mutate: func(c *AuthConfig) { c.BcryptCost = 9 }, wantErr: "AUTH_BCRYPT_COST"},
 		{name: "cost above range", mutate: func(c *AuthConfig) { c.BcryptCost = 16 }, wantErr: "AUTH_BCRYPT_COST"},
@@ -104,7 +109,7 @@ type AuthConfig struct {
 }
 ```
 
-Place `Auth AuthConfig` between Redis and Log in `Config`. Trim issuer/audience but preserve the secret byte-for-byte. Validate secret length `>=32`, positive TTLs, `RefreshTokenTTL > AccessTokenTTL`, and cost `10..15`. Add `LoadMigration()` returning only Environment/Database/Log configuration so migration commands do not need an unrelated JWT secret. Implement:
+Place `Auth AuthConfig` between Redis and Log in `Config`. Trim issuer/audience but preserve the secret byte-for-byte. Validate secret length `>=32`; require both TTLs to be at least one second and exact multiples of `time.Second`; require `RefreshTokenTTL > AccessTokenTTL`; and validate cost `10..15`. The scalar cost range does not authorize changing it after users exist: Task 15 documents the persistent lifecycle contract and mandatory database predeployment check. Add `LoadMigration()` returning only Environment/Database/Log configuration so migration commands do not need an unrelated JWT secret. Implement:
 
 ```go
 func (c AuthConfig) LogValue() slog.Value {
@@ -913,7 +918,7 @@ git commit -m "test: cover identity postgres invariants"
 
 - [ ] **Step 1: Update operator and API documentation**
 
-Document all six auth settings, CSPRNG secret guidance, nine routes, token/session lifetimes, one-time refresh rotation, logout special authentication, state matrix, mute recovery/audit, `00002_identity.sql`, parameterized admin promotion SQL, default versus PostgreSQL tests, and Redis exclusion from authentication correctness. Mark the design status implemented only after all implementation verification passes.
+Document all six auth settings, the access/refresh minimum-one-second whole-second TTL contract, CSPRNG secret guidance, nine routes, token/session lifetimes, one-time refresh rotation, logout special authentication, state matrix, mute recovery/audit, `00002_identity.sql`, parameterized admin promotion SQL, default versus PostgreSQL tests, and Redis exclusion from authentication correctness. Document that bcrypt cost may be selected within `10..15` only while `users` is empty, is immutable afterward and identical across all instances, cannot change during a normal rolling deploy, and requires an independently designed password-reset/credential-upgrade path for future increases rather than unsupported rehash. Include the parameterized PostgreSQL predeployment check and require `incompatible_password_hashes = 0` before deployment. Mark the design status implemented only after all implementation verification passes.
 
 - [ ] **Step 2: Normalize dependencies and inspect drift**
 

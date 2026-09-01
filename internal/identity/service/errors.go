@@ -12,6 +12,7 @@ var (
 	ErrInvalidServiceConfiguration = errors.New("identity service configuration is invalid")
 	ErrValidationFailed            = errors.New("validation failed")
 	ErrEmailAlreadyRegistered      = errors.New("email already registered")
+	ErrInvalidCredentials          = errors.New("invalid credentials")
 )
 
 type ValidationField string

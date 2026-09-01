@@ -540,11 +540,14 @@ Access token 是 HS256 JWT，至少包含：
 ### 9.3 Password
 
 - 使用 `golang.org/x/crypto/bcrypt`。
-- Bcrypt cost 来自配置，允许 `10..15`，默认 12。
+- Bcrypt cost 来自配置，允许 `10..15`，默认 12；只能在 `users` 表为空、创建首个用户之前选择。
+- 首个用户创建后，bcrypt cost 成为不可变的持久化契约。所有实例必须始终使用同一值，普通 rolling deploy、扩缩容和回滚不得改变它。
+- bcrypt 无法在不知道明文密码的情况下离线提高已有 hash 的 cost。未来升级必须另行设计受控密码重置或凭据升级流程；M2 不支持 rehash。
 - 密码只以 hash 形式进入数据库。
 - 正常日志、错误、响应和测试失败信息不输出密码或 hash。
 - Password adapter 启动时使用正式 cost 生成 dummy hash。
 - Dummy candidate 是固定、非敏感且为 `8..72` 字节的内部值。
+- 存量 hash cost 与当前配置不一致时，adapter 执行当前配置 cost 的 dummy workload，并返回普通凭据不匹配。这是违反运维不变量时的安全失败，不是 cost 迁移或兼容机制。
 
 ## 10. Auth 配置
 
@@ -569,7 +572,9 @@ AUTH_REFRESH_TOKEN_TTL=720h
 AUTH_BCRYPT_COST=12
 ```
 
-`AUTH_JWT_SECRET` 必填、无默认值、至少 32 字节，不自动 trim。Access/refresh TTL 必须大于零，refresh TTL 必须大于 access TTL。Auth config 的 `slog.LogValue()` 必须将 JWT secret 输出为 `[REDACTED]`。
+`AUTH_JWT_SECRET` 必填、无默认值、至少 32 字节，不自动 trim。Access/refresh TTL 都必须至少为 1 秒且为 `time.Second` 的整数倍，refresh TTL 必须严格大于 access TTL。Auth config 的 `slog.LogValue()` 必须将 JWT secret 输出为 `[REDACTED]`。
+
+`AUTH_BCRYPT_COST` 的 `10..15` 配置校验只约束单个进程的输入，不代表已有用户后可以修改。部署前必须使用 README 中参数化的 PostgreSQL 检查确认所有现存 `password_hash` 的 cost 与目标配置一致；结果不为 `0` 时停止部署。空 `users` 表可在范围内初始化，非空表禁止通过普通部署改变该值。
 
 Issuer 和 audience 执行 `strings.TrimSpace` 后必须非空；JWT secret 始终保留原始字节。Auth 校验在根 `Config.Validate()` 的 Redis 之后、Log 之前执行，保持稳定 fail-fast 顺序：
 
@@ -979,3 +984,4 @@ M2 完成时必须满足：
 15. `go mod tidy` 后无未审查依赖漂移，`go mod verify` 通过。
 16. README、`.env.example`、migration 文档和 API/运维说明与实现一致。
 17. 用户未跟踪需求文档未被修改或提交。
+18. bcrypt cost 在首个用户后保持不可变且所有实例一致；部署前参数化检查的 `incompatible_password_hashes` 必须为 `0`，否则停止部署。
