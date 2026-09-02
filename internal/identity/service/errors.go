@@ -17,6 +17,9 @@ var (
 	ErrSessionInvalid              = errors.New("session invalid")
 	ErrUserFrozen                  = errors.New("user frozen")
 	ErrUserNotFound                = errors.New("user not found")
+	ErrAdminRequired               = errors.New("admin required")
+	ErrAdminTargetForbidden        = errors.New("admin target forbidden")
+	ErrInvalidStatusTransition     = errors.New("invalid status transition")
 )
 
 type ValidationField string
@@ -26,6 +29,9 @@ const (
 	ValidationFieldPassword    ValidationField = "password"
 	ValidationFieldDisplayName ValidationField = "display_name"
 	ValidationFieldBio         ValidationField = "bio"
+	ValidationFieldStatus      ValidationField = "status"
+	ValidationFieldReason      ValidationField = "reason"
+	ValidationFieldMutedUntil  ValidationField = "muted_until"
 )
 
 type ValidationError struct {
