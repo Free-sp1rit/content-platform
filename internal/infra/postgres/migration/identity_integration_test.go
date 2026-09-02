@@ -160,14 +160,14 @@ func assertIdentityIndexDefinitions(t *testing.T, ctx context.Context, db *sql.D
 			if keyCount != len(testCase.columns) {
 				t.Fatalf("index %s key count = %d, want %d", testCase.name, keyCount, len(testCase.columns))
 			}
-			for position, expectedColumn := range testCase.columns {
-				var columnDefinition string
-				if err := db.QueryRowContext(ctx, "SELECT pg_get_indexdef($1::oid, $2, true)", indexOID, position+1).Scan(&columnDefinition); err != nil {
-					t.Fatalf("inspect index %s column %d: %v", testCase.name, position+1, err)
-				}
-				if normalizedColumn := normalizeIndexSQL(columnDefinition); !strings.Contains(normalizedColumn, expectedColumn) {
-					t.Fatalf("index %s column %d does not contain %q", testCase.name, position+1, expectedColumn)
-				}
+			var indexDefinition string
+			if err := db.QueryRowContext(ctx, "SELECT pg_get_indexdef($1::oid, 0, false)", indexOID).Scan(&indexDefinition); err != nil {
+				t.Fatalf("inspect index %s definition: %v", testCase.name, err)
+			}
+			normalizedDefinition := normalizeIndexSQL(indexDefinition)
+			expectedColumns := "(" + strings.Join(testCase.columns, ",") + ")"
+			if !strings.Contains(normalizedDefinition, expectedColumns) {
+				t.Fatalf("index %s definition does not contain ordered columns %q: %q", testCase.name, expectedColumns, normalizedDefinition)
 			}
 			normalizedPredicate := normalizeIndexSQL(predicate)
 			if testCase.predicate == "" {
