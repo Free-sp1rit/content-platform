@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -75,6 +76,12 @@ func TestChangeUserStatusNoOpAuthenticatesWithoutStatusWrites(t *testing.T) {
 	if len(repo.events) < 2 || repo.events[0] != "lock-users" || repo.events[1] != "lock-session" {
 		t.Fatalf("events = %v", repo.events)
 	}
+	if repo.lockSessionCalls != 1 || repo.lockActiveSessionCalls != 0 || len(repo.sessionLockRequests) != 0 {
+		t.Fatalf("no-op session locks = direct:%d active:%d combined:%d", repo.lockSessionCalls, repo.lockActiveSessionCalls, len(repo.sessionLockRequests))
+	}
+	if len(repo.userLockRequests) != 1 || !reflect.DeepEqual(repo.userLockRequests[0], []int64{20, 9}) {
+		t.Fatalf("user lock requests = %#v, want one actor/target request", repo.userLockRequests)
+	}
 }
 
 func TestChangeUserStatusRejectsInvalidActorSessionAndTargets(t *testing.T) {
@@ -82,6 +89,8 @@ func TestChangeUserStatusRejectsInvalidActorSessionAndTargets(t *testing.T) {
 	deleted := statusTestUser(2, domain.RoleUser, domain.StatusDeleted)
 	deletedAt := now.Add(-time.Hour)
 	deleted.DeletedAt = &deletedAt
+	deletedActor := statusTestUser(1, domain.RoleAdmin, domain.StatusDeleted)
+	deletedActor.DeletedAt = &deletedAt
 	tests := []struct {
 		name      string
 		users     []domain.User
@@ -89,10 +98,14 @@ func TestChangeUserStatusRejectsInvalidActorSessionAndTargets(t *testing.T) {
 		want      error
 	}{
 		{name: "missing actor session", users: []domain.User{statusTestUser(1, domain.RoleAdmin, domain.StatusActive), statusTestUser(2, domain.RoleUser, domain.StatusActive)}, configure: func(r *statusRepositoryFake) { r.session = domain.UserSession{} }, want: ErrSessionInvalid},
+		{name: "missing target with invalid session", users: []domain.User{statusTestUser(1, domain.RoleAdmin, domain.StatusActive)}, configure: func(r *statusRepositoryFake) { r.session = domain.UserSession{} }, want: ErrSessionInvalid},
+		{name: "missing target with non admin", users: []domain.User{statusTestUser(1, domain.RoleUser, domain.StatusActive)}, want: ErrAdminRequired},
+		{name: "missing target with deleted actor", users: []domain.User{deletedActor}, want: ErrSessionInvalid},
 		{name: "other admin", users: []domain.User{statusTestUser(1, domain.RoleAdmin, domain.StatusActive), statusTestUser(2, domain.RoleAdmin, domain.StatusActive)}, want: ErrAdminTargetForbidden},
-		{name: "missing target", users: []domain.User{statusTestUser(1, domain.RoleAdmin, domain.StatusActive)}, want: ErrInvalidStatusTransition},
+		{name: "missing target", users: []domain.User{statusTestUser(1, domain.RoleAdmin, domain.StatusActive)}, want: ErrUserNotFound},
 		{name: "deleted target", users: []domain.User{statusTestUser(1, domain.RoleAdmin, domain.StatusActive), deleted}, want: ErrInvalidStatusTransition},
-		{name: "unknown target status", users: []domain.User{statusTestUser(1, domain.RoleAdmin, domain.StatusActive), statusTestUser(2, domain.RoleUser, domain.Status("secret"))}, want: ErrInvalidStatusTransition},
+		{name: "unknown target role", users: []domain.User{statusTestUser(1, domain.RoleAdmin, domain.StatusActive), statusTestUser(2, domain.Role("moderator"), domain.StatusActive)}, want: ErrInternal},
+		{name: "unknown target status", users: []domain.User{statusTestUser(1, domain.RoleAdmin, domain.StatusActive), statusTestUser(2, domain.RoleUser, domain.Status("secret"))}, want: ErrInternal},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -134,7 +147,7 @@ func TestChangeUserStatusAllowsApprovedTransitions(t *testing.T) {
 	}
 }
 
-func TestChangeUserStatusBanningLocksActorThenTargetSessionsAndRevokesAscending(t *testing.T) {
+func TestChangeUserStatusBanningLocksActorAndTargetSessionsInOneSortedSet(t *testing.T) {
 	now := time.Date(2026, time.September, 2, 8, 30, 45, 0, time.UTC)
 	repo := newStatusRepository(statusTestUser(2, domain.RoleUser, domain.StatusActive), statusTestUser(1, domain.RoleAdmin, domain.StatusActive))
 	repo.session.ID = 50
@@ -143,8 +156,18 @@ func TestChangeUserStatusBanningLocksActorThenTargetSessionsAndRevokesAscending(
 	if err != nil || got.Status != domain.StatusBanned {
 		t.Fatalf("result = %#v, %v", got, err)
 	}
-	if len(repo.events) < 3 || repo.events[1] != "lock-session" || repo.events[2] != "lock-active-sessions" {
-		t.Fatalf("events = %v, want actor session then target sessions", repo.events)
+	if repo.lockSessionCalls != 0 || repo.lockActiveSessionCalls != 0 {
+		t.Fatalf("separate session lock calls = (%d, %d), want zero", repo.lockSessionCalls, repo.lockActiveSessionCalls)
+	}
+	if len(repo.sessionLockRequests) != 1 {
+		t.Fatalf("LockSessions requests = %#v, want one", repo.sessionLockRequests)
+	}
+	wantRequest := SessionLockRequest{SessionIDs: []int64{50}, ActiveUserIDs: []int64{2}}
+	if !reflect.DeepEqual(repo.sessionLockRequests[0], wantRequest) {
+		t.Fatalf("LockSessions request = %#v, want %#v", repo.sessionLockRequests[0], wantRequest)
+	}
+	if len(repo.events) < 2 || repo.events[1] != "lock-sessions" {
+		t.Fatalf("events = %v, want unified session lock after user lock", repo.events)
 	}
 	wantIDs := []int64{3, 40}
 	if len(repo.revokedIDs) != 2 || repo.revokedIDs[0] != wantIDs[0] || repo.revokedIDs[1] != wantIDs[1] {
@@ -155,6 +178,35 @@ func TestChangeUserStatusBanningLocksActorThenTargetSessionsAndRevokesAscending(
 	}
 	if repo.events[len(repo.events)-1] != "audit:user.status_changed" {
 		t.Fatalf("status audit was not last: %v", repo.events)
+	}
+}
+
+func TestChangeUserStatusRejectsMalformedUnifiedSessionSet(t *testing.T) {
+	now := time.Date(2026, time.September, 2, 8, 30, 45, 0, time.UTC)
+	validActor := domain.UserSession{ID: 50, UserID: 1, CreatedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour)}
+	validTarget := domain.UserSession{ID: 3, UserID: 2, CreatedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour)}
+	tests := []struct {
+		name     string
+		sessions []domain.UserSession
+		want     error
+	}{
+		{name: "missing actor", sessions: []domain.UserSession{validTarget}, want: ErrSessionInvalid},
+		{name: "duplicate actor", sessions: []domain.UserSession{validActor, validActor}, want: ErrInternal},
+		{name: "wrong actor owner", sessions: []domain.UserSession{{ID: 50, UserID: 2, CreatedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour)}}, want: ErrSessionInvalid},
+		{name: "unexpected owner", sessions: []domain.UserSession{validTarget, {ID: 40, UserID: 9, CreatedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour)}, validActor}, want: ErrInternal},
+		{name: "revoked target", sessions: []domain.UserSession{{ID: 3, UserID: 2, CreatedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), RevokedAt: func() *time.Time { v := now; return &v }()}, validActor}, want: ErrInternal},
+		{name: "unordered", sessions: []domain.UserSession{validActor, validTarget}, want: ErrInternal},
+		{name: "damaged target", sessions: []domain.UserSession{{ID: 3, UserID: 2, CreatedAt: now, ExpiresAt: now}, validActor}, want: ErrInternal},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newStatusRepository(statusTestUser(1, domain.RoleAdmin, domain.StatusActive), statusTestUser(2, domain.RoleUser, domain.StatusActive))
+			repo.lockSessionsResult = tt.sessions
+			got, err := statusTestService(repo, now).ChangeUserStatus(context.Background(), ChangeUserStatusInput{ActorID: 1, ActorSessionID: 50, TargetID: 2, NewStatus: domain.StatusBanned})
+			if !errors.Is(err, tt.want) || got != (domain.UserView{}) {
+				t.Fatalf("result = %#v, error = %v, want %v", got, err, tt.want)
+			}
+		})
 	}
 }
 
@@ -177,6 +229,83 @@ func TestChangeUserStatusRecoversExpiredMuteBeforeRequestedTransition(t *testing
 	}
 }
 
+func TestChangeUserStatusSamplesTimeAfterSessionLocks(t *testing.T) {
+	beforeLocks := time.Date(2026, time.September, 2, 8, 30, 45, 0, time.UTC)
+	afterLocks := beforeLocks.Add(15 * time.Second)
+	t.Run("actor session expires while waiting for locks", func(t *testing.T) {
+		clock := &statusMutableClock{now: beforeLocks}
+		repo := newStatusRepository(statusTestUser(1, domain.RoleAdmin, domain.StatusActive), statusTestUser(2, domain.RoleUser, domain.StatusActive))
+		repo.session.ExpiresAt = beforeLocks.Add(5 * time.Second)
+		repo.afterSessionLock = func() { clock.now = afterLocks }
+		got, err := statusTestServiceWithClock(repo, clock).ChangeUserStatus(context.Background(), ChangeUserStatusInput{ActorID: 1, ActorSessionID: 10, TargetID: 2, NewStatus: domain.StatusActive})
+		if !errors.Is(err, ErrSessionInvalid) || got != (domain.UserView{}) {
+			t.Fatalf("result = %#v, error = %v, want ErrSessionInvalid", got, err)
+		}
+		if clock.calls != 1 {
+			t.Fatalf("Clock.Now calls = %d, want one", clock.calls)
+		}
+	})
+	t.Run("mute deadline passes while waiting for locks", func(t *testing.T) {
+		clock := &statusMutableClock{now: beforeLocks}
+		repo := newStatusRepository(statusTestUser(1, domain.RoleAdmin, domain.StatusActive), statusTestUser(2, domain.RoleUser, domain.StatusActive))
+		repo.afterSessionLock = func() { clock.now = afterLocks }
+		mutedUntil := beforeLocks.Add(5 * time.Second)
+		got, err := statusTestServiceWithClock(repo, clock).ChangeUserStatus(context.Background(), ChangeUserStatusInput{ActorID: 1, ActorSessionID: 10, TargetID: 2, NewStatus: domain.StatusMuted, MutedUntil: &mutedUntil})
+		if !errors.Is(err, ErrValidationFailed) || got != (domain.UserView{}) {
+			t.Fatalf("result = %#v, error = %v, want validation failure", got, err)
+		}
+		if len(repo.mutations) != 0 || len(repo.audits) != 0 {
+			t.Fatalf("expired requested mute wrote state: mutations=%d audits=%d", len(repo.mutations), len(repo.audits))
+		}
+	})
+}
+
+func TestChangeUserStatusUsesLockTimeForMuteRecoveryWritesAndAudits(t *testing.T) {
+	beforeLocks := time.Date(2026, time.September, 2, 8, 30, 45, 0, time.UTC)
+	afterLocks := beforeLocks.Add(15 * time.Second)
+	muteExpiry := beforeLocks.Add(5 * time.Second)
+	actor := statusTestUser(1, domain.RoleAdmin, domain.StatusMuted)
+	actor.MutedUntil = &muteExpiry
+	target := statusTestUser(2, domain.RoleUser, domain.StatusMuted)
+	target.MutedUntil = &muteExpiry
+	clock := &statusMutableClock{now: beforeLocks}
+	repo := newStatusRepository(actor, target)
+	repo.afterSessionLock = func() { clock.now = afterLocks }
+
+	got, err := statusTestServiceWithClock(repo, clock).ChangeUserStatus(context.Background(), ChangeUserStatusInput{ActorID: 1, ActorSessionID: 10, TargetID: 2, NewStatus: domain.StatusFrozen, RequestID: "lock-time"})
+	if err != nil || got.Status != domain.StatusFrozen || !got.UpdatedAt.Equal(afterLocks) {
+		t.Fatalf("result = %#v, error = %v, want lock-time frozen view", got, err)
+	}
+	if clock.calls != 1 {
+		t.Fatalf("Clock.Now calls = %d, want one", clock.calls)
+	}
+	if len(repo.audits) != 3 || repo.audits[0].Action != "user.mute_expired" || repo.audits[0].TargetID != 1 || repo.audits[1].Action != "user.mute_expired" || repo.audits[1].TargetID != 2 || repo.audits[2].Action != "user.status_changed" {
+		t.Fatalf("audits = %#v, want actor recovery, target recovery, status change", repo.audits)
+	}
+	for _, audit := range repo.audits {
+		if !audit.CreatedAt.Equal(afterLocks) {
+			t.Fatalf("audit CreatedAt = %v, want %v", audit.CreatedAt, afterLocks)
+		}
+	}
+	if len(repo.mutations) != 1 || !repo.mutations[0].UpdatedAt.Value.Equal(afterLocks) {
+		t.Fatalf("status mutations = %#v, want lock-time update", repo.mutations)
+	}
+}
+
+func TestChangeUserStatusClockFailureAfterLocksRollsBack(t *testing.T) {
+	beforeLocks := time.Date(2026, time.September, 2, 8, 30, 45, 0, time.UTC)
+	clock := &statusMutableClock{now: beforeLocks}
+	repo := newStatusRepository(statusTestUser(1, domain.RoleAdmin, domain.StatusActive), statusTestUser(2, domain.RoleUser, domain.StatusActive))
+	repo.afterSessionLock = func() { clock.now = time.Time{} }
+	got, err := statusTestServiceWithClock(repo, clock).ChangeUserStatus(context.Background(), ChangeUserStatusInput{ActorID: 1, ActorSessionID: 10, TargetID: 2, NewStatus: domain.StatusFrozen})
+	if !errors.Is(err, ErrInternal) || got != (domain.UserView{}) {
+		t.Fatalf("result = %#v, error = %v, want safe internal failure", got, err)
+	}
+	if len(repo.mutations) != 0 || len(repo.audits) != 0 {
+		t.Fatalf("clock failure wrote state: mutations=%d audits=%d", len(repo.mutations), len(repo.audits))
+	}
+}
+
 func TestChangeUserStatusFailuresReturnZeroViewAndRollBack(t *testing.T) {
 	now := time.Date(2026, time.September, 2, 8, 30, 45, 0, time.UTC)
 	tests := []struct {
@@ -190,9 +319,24 @@ func TestChangeUserStatusFailuresReturnZeroViewAndRollBack(t *testing.T) {
 			r.revokeErr = errors.New("token secret")
 		}},
 		{name: "audit", status: domain.StatusFrozen, configure: func(r *statusRepositoryFake) { r.auditErrAt = 1 }},
-		{name: "recovery", status: domain.StatusFrozen, configure: func(r *statusRepositoryFake) { expired:=now.Add(-time.Minute); r.users[1].Status=domain.StatusMuted; r.users[1].MutedUntil=&expired; r.recoverErr=errors.New("sql secret") }},
-		{name: "recovery audit", status: domain.StatusFrozen, configure: func(r *statusRepositoryFake) { expired:=now.Add(-time.Minute); r.users[1].Status=domain.StatusMuted; r.users[1].MutedUntil=&expired; r.auditErrAt=1 }},
-		{name: "status audit after recovery", status: domain.StatusFrozen, configure: func(r *statusRepositoryFake) { expired:=now.Add(-time.Minute); r.users[1].Status=domain.StatusMuted; r.users[1].MutedUntil=&expired; r.auditErrAt=2 }},
+		{name: "recovery", status: domain.StatusFrozen, configure: func(r *statusRepositoryFake) {
+			expired := now.Add(-time.Minute)
+			r.users[1].Status = domain.StatusMuted
+			r.users[1].MutedUntil = &expired
+			r.recoverErr = errors.New("sql secret")
+		}},
+		{name: "recovery audit", status: domain.StatusFrozen, configure: func(r *statusRepositoryFake) {
+			expired := now.Add(-time.Minute)
+			r.users[1].Status = domain.StatusMuted
+			r.users[1].MutedUntil = &expired
+			r.auditErrAt = 1
+		}},
+		{name: "status audit after recovery", status: domain.StatusFrozen, configure: func(r *statusRepositoryFake) {
+			expired := now.Add(-time.Minute)
+			r.users[1].Status = domain.StatusMuted
+			r.users[1].MutedUntil = &expired
+			r.auditErrAt = 2
+		}},
 		{name: "commit", status: domain.StatusFrozen, configure: func(r *statusRepositoryFake) { r.commitErr = errors.New("driver secret") }},
 	}
 	for _, tt := range tests {
@@ -220,7 +364,11 @@ func statusTestUser(id int64, role domain.Role, status domain.Status) domain.Use
 }
 
 func statusTestService(repository Repository, now time.Time) *Service {
-	service, err := New(Dependencies{Repository: repository, PasswordHasher: statusPasswordStub{}, AccessTokenManager: statusTokenStub{}, RefreshTokenGenerator: statusRefreshStub{}, Clock: statusClockStub{now: now}}, Config{AccessTokenTTL: time.Minute, RefreshTokenTTL: 2 * time.Minute})
+	return statusTestServiceWithClock(repository, statusClockStub{now: now})
+}
+
+func statusTestServiceWithClock(repository Repository, clock Clock) *Service {
+	service, err := New(Dependencies{Repository: repository, PasswordHasher: statusPasswordStub{}, AccessTokenManager: statusTokenStub{}, RefreshTokenGenerator: statusRefreshStub{}, Clock: clock}, Config{AccessTokenTTL: time.Minute, RefreshTokenTTL: 2 * time.Minute})
 	if err != nil {
 		panic(err)
 	}
@@ -230,6 +378,16 @@ func statusTestService(repository Repository, now time.Time) *Service {
 type statusClockStub struct{ now time.Time }
 
 func (c statusClockStub) Now() time.Time { return c.now }
+
+type statusMutableClock struct {
+	now   time.Time
+	calls int
+}
+
+func (c *statusMutableClock) Now() time.Time {
+	c.calls++
+	return c.now
+}
 
 type statusPasswordStub struct{}
 
@@ -253,19 +411,25 @@ func (statusRefreshStub) Parse(string) (int64, [32]byte, error) { return 0, [32]
 func (statusRefreshStub) Match([32]byte, [32]byte) bool         { return true }
 
 type statusRepositoryFake struct {
-	users          []domain.User
-	session        domain.UserSession
-	targetSessions []domain.UserSession
-	events         []string
-	audits         []AuditEntry
-	mutations      []UserMutation
-	revokedIDs     []int64
-	txCalls        int
-	updateErr      error
-	revokeErr      error
-	recoverErr     error
-	auditErrAt     int
-	commitErr      error
+	users                  []domain.User
+	session                domain.UserSession
+	targetSessions         []domain.UserSession
+	events                 []string
+	audits                 []AuditEntry
+	mutations              []UserMutation
+	revokedIDs             []int64
+	txCalls                int
+	updateErr              error
+	revokeErr              error
+	recoverErr             error
+	auditErrAt             int
+	commitErr              error
+	lockSessionCalls       int
+	lockActiveSessionCalls int
+	sessionLockRequests    []SessionLockRequest
+	lockSessionsResult     []domain.UserSession
+	afterSessionLock       func()
+	userLockRequests       [][]int64
 }
 
 func (r *statusRepositoryFake) CreateUser(context.Context, CreateUserRecord) (domain.User, error) {
@@ -292,13 +456,15 @@ func (r *statusRepositoryFake) WithinTx(ctx context.Context, callback func(conte
 	staged.mutations = append([]UserMutation(nil), r.mutations...)
 	staged.revokedIDs = append([]int64(nil), r.revokedIDs...)
 	if err := callback(ctx, &statusTxFake{repo: &staged}); err != nil {
-		r.events = staged.events
+		r.events, r.lockSessionCalls, r.lockActiveSessionCalls, r.sessionLockRequests, r.userLockRequests = staged.events, staged.lockSessionCalls, staged.lockActiveSessionCalls, staged.sessionLockRequests, staged.userLockRequests
 		return err
 	}
 	if r.commitErr != nil {
 		return r.commitErr
 	}
 	r.users, r.events, r.audits, r.mutations, r.revokedIDs = staged.users, staged.events, staged.audits, staged.mutations, staged.revokedIDs
+	r.lockSessionCalls, r.lockActiveSessionCalls, r.sessionLockRequests = staged.lockSessionCalls, staged.lockActiveSessionCalls, staged.sessionLockRequests
+	r.userLockRequests = staged.userLockRequests
 	return nil
 }
 
@@ -306,6 +472,7 @@ type statusTxFake struct{ repo *statusRepositoryFake }
 
 func (tx *statusTxFake) LockUsers(_ context.Context, ids []int64) ([]LockedUser, error) {
 	tx.repo.events = append(tx.repo.events, "lock-users")
+	tx.repo.userLockRequests = append(tx.repo.userLockRequests, append([]int64(nil), ids...))
 	ordered := append([]int64(nil), ids...)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
 	result := make([]domain.User, 0, len(ordered))
@@ -320,21 +487,36 @@ func (tx *statusTxFake) LockUsers(_ context.Context, ids []int64) ([]LockedUser,
 }
 func (tx *statusTxFake) LockSession(context.Context, int64) (domain.UserSession, error) {
 	tx.repo.events = append(tx.repo.events, "lock-session")
+	tx.repo.lockSessionCalls++
 	if tx.repo.session.ID == 0 {
 		return domain.UserSession{}, ErrNotFound
+	}
+	if tx.repo.afterSessionLock != nil {
+		tx.repo.afterSessionLock()
 	}
 	return tx.repo.session, nil
 }
 func (tx *statusTxFake) LockActiveSessions(context.Context, int64) ([]domain.UserSession, error) {
 	tx.repo.events = append(tx.repo.events, "lock-active-sessions")
+	tx.repo.lockActiveSessionCalls++
 	result := append([]domain.UserSession(nil), tx.repo.targetSessions...)
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, nil
 }
-func (tx *statusTxFake) LockSessions(context.Context, SessionLockRequest) ([]domain.UserSession, error) {
+func (tx *statusTxFake) LockSessions(_ context.Context, request SessionLockRequest) ([]domain.UserSession, error) {
 	tx.repo.events = append(tx.repo.events, "lock-sessions")
+	tx.repo.sessionLockRequests = append(tx.repo.sessionLockRequests, request)
+	if tx.repo.lockSessionsResult != nil {
+		if tx.repo.afterSessionLock != nil {
+			tx.repo.afterSessionLock()
+		}
+		return append([]domain.UserSession(nil), tx.repo.lockSessionsResult...), nil
+	}
 	result := append([]domain.UserSession{tx.repo.session}, tx.repo.targetSessions...)
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	if tx.repo.afterSessionLock != nil {
+		tx.repo.afterSessionLock()
+	}
 	return result, nil
 }
 func (tx *statusTxFake) CreateSession(context.Context, CreateSessionRecord) (domain.UserSession, error) {

@@ -41,13 +41,9 @@ func (s *Service) ChangeUserStatus(ctx context.Context, input ChangeUserStatusIn
 	if !validAdministrativeStatus(input.NewStatus) {
 		return domain.UserView{}, newValidationError(ValidationFieldStatus)
 	}
-	now, err := s.now()
-	if err != nil {
-		return domain.UserView{}, err
-	}
 	mutedUntil := normalizeStatusTime(input.MutedUntil)
 	if input.NewStatus == domain.StatusMuted {
-		if mutedUntil == nil || !validAuthenticationTime(*mutedUntil) || !mutedUntil.After(now) {
+		if mutedUntil == nil || !validAuthenticationTime(*mutedUntil) {
 			return domain.UserView{}, newValidationError(ValidationFieldMutedUntil)
 		}
 	} else if input.MutedUntil != nil {
@@ -55,7 +51,7 @@ func (s *Service) ChangeUserStatus(ctx context.Context, input ChangeUserStatusIn
 	}
 
 	var latest domain.User
-	err = s.repository.WithinTx(ctx, func(txCtx context.Context, tx Tx) error {
+	err := s.repository.WithinTx(ctx, func(txCtx context.Context, tx Tx) error {
 		users, err := tx.LockUsers(txCtx, []int64{input.ActorID, input.TargetID})
 		if err != nil {
 			return newInternalError(err)
@@ -80,16 +76,37 @@ func (s *Service) ChangeUserStatus(ctx context.Context, input ChangeUserStatusIn
 		if !actorFound {
 			return ErrSessionInvalid
 		}
-		if !targetFound {
-			return ErrInvalidStatusTransition
-		}
-
-		session, err := tx.LockSession(txCtx, input.ActorSessionID)
-		if err != nil {
-			if errors.Is(err, ErrNotFound) {
-				return ErrSessionInvalid
+		var session domain.UserSession
+		var targetSessions []domain.UserSession
+		banningNoOp := targetFound && target.Status == domain.StatusBanned && target.MutedUntil == nil
+		if input.NewStatus == domain.StatusBanned && !banningNoOp {
+			lockedSessions, lockErr := tx.LockSessions(txCtx, SessionLockRequest{
+				SessionIDs: []int64{input.ActorSessionID}, ActiveUserIDs: []int64{input.TargetID},
+			})
+			if lockErr != nil {
+				return newInternalError(lockErr)
 			}
-			return newInternalError(err)
+			session, targetSessions, err = validateAdministrativeSessionSet(
+				lockedSessions, input.ActorID, input.ActorSessionID, input.TargetID,
+			)
+			if err != nil {
+				return err
+			}
+		} else {
+			session, err = tx.LockSession(txCtx, input.ActorSessionID)
+			if err != nil {
+				if errors.Is(err, ErrNotFound) {
+					return ErrSessionInvalid
+				}
+				return newInternalError(err)
+			}
+		}
+		now, err := s.now()
+		if err != nil {
+			return err
+		}
+		if input.NewStatus == domain.StatusMuted && !mutedUntil.After(now) {
+			return newValidationError(ValidationFieldMutedUntil)
 		}
 		if !validAuthenticationSessionStructure(AuthenticationSession{
 			ID: session.ID, UserID: session.UserID, ExpiresAt: session.ExpiresAt,
@@ -98,9 +115,6 @@ func (s *Service) ChangeUserStatus(ctx context.Context, input ChangeUserStatusIn
 			return ErrSessionInvalid
 		}
 
-		if actor.DeletedAt != nil || actor.Status == domain.StatusBanned || actor.Status == domain.StatusDeleted {
-			return ErrSessionInvalid
-		}
 		if !validProfileUserStructure(actor, input.ActorID, false) {
 			return newInternalError(nil)
 		}
@@ -111,23 +125,27 @@ func (s *Service) ChangeUserStatus(ctx context.Context, input ChangeUserStatusIn
 				return err
 			}
 		}
-		if actor.Role != domain.RoleAdmin {
-			return ErrAdminRequired
+		if err := validateStatusActor(actor); err != nil {
+			return err
 		}
-		if actor.Status == domain.StatusFrozen {
-			return ErrUserFrozen
+		if !targetFound {
+			return ErrUserNotFound
 		}
 
 		if target.DeletedAt != nil {
 			return ErrInvalidStatusTransition
 		}
-		if target.Role != domain.RoleUser {
+		switch target.Role {
+		case domain.RoleAdmin:
 			return ErrAdminTargetForbidden
+		case domain.RoleUser:
+		default:
+			return newInternalError(nil)
 		}
 		switch target.Status {
 		case domain.StatusPending, domain.StatusActive, domain.StatusMuted, domain.StatusFrozen, domain.StatusBanned:
 		default:
-			return ErrInvalidStatusTransition
+			return newInternalError(nil)
 		}
 		if !validProfileUserStructure(target, input.TargetID, false) {
 			return newInternalError(nil)
@@ -152,16 +170,6 @@ func (s *Service) ChangeUserStatus(ctx context.Context, input ChangeUserStatusIn
 		}
 		if !validAdministrativeTransition(target.Status, input.NewStatus) {
 			return ErrInvalidStatusTransition
-		}
-		var targetSessions []domain.UserSession
-		if input.NewStatus == domain.StatusBanned {
-			targetSessions, err = tx.LockActiveSessions(txCtx, input.TargetID)
-			if err != nil {
-				return newInternalError(err)
-			}
-			if err := validateStatusSessions(targetSessions, input.TargetID); err != nil {
-				return err
-			}
 		}
 
 		previous := target
@@ -208,7 +216,9 @@ func (s *Service) ChangeUserStatus(ctx context.Context, input ChangeUserStatusIn
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrAdminRequired), errors.Is(err, ErrAdminTargetForbidden),
-			errors.Is(err, ErrInvalidStatusTransition), errors.Is(err, ErrUserFrozen), errors.Is(err, ErrSessionInvalid):
+			errors.Is(err, ErrInvalidStatusTransition), errors.Is(err, ErrUserFrozen),
+			errors.Is(err, ErrSessionInvalid), errors.Is(err, ErrUserNotFound),
+			errors.Is(err, ErrValidationFailed):
 			return domain.UserView{}, err
 		}
 		return domain.UserView{}, newInternalError(err)
@@ -251,6 +261,19 @@ func validAdministrativeTransition(old, next domain.Status) bool {
 	return true
 }
 
+func validateStatusActor(actor domain.User) error {
+	if actor.DeletedAt != nil || actor.Status == domain.StatusBanned || actor.Status == domain.StatusDeleted {
+		return ErrSessionInvalid
+	}
+	if actor.Role != domain.RoleAdmin {
+		return ErrAdminRequired
+	}
+	if actor.Status == domain.StatusFrozen {
+		return ErrUserFrozen
+	}
+	return nil
+}
+
 func normalizeStatusTime(value *time.Time) *time.Time {
 	if value == nil {
 		return nil
@@ -266,21 +289,43 @@ func validStatusMutationResult(updated, previous domain.User, mutation UserMutat
 		updated.Status == mutation.Status.Value && optionalTimesEqual(updated.MutedUntil, mutation.MutedUntil.Value) && updated.UpdatedAt.Equal(now)
 }
 
-func validateStatusSessions(sessions []domain.UserSession, userID int64) error {
-	ids := make([]int64, len(sessions))
-	for i, session := range sessions {
-		if session.ID <= 0 || session.UserID != userID || session.RevokedAt != nil {
-			return newInternalError(nil)
+func validateAdministrativeSessionSet(
+	sessions []domain.UserSession,
+	actorID int64,
+	actorSessionID int64,
+	targetID int64,
+) (domain.UserSession, []domain.UserSession, error) {
+	var actorSession domain.UserSession
+	targetSessions := make([]domain.UserSession, 0, len(sessions))
+	var previousID int64
+	for index, session := range sessions {
+		if session.ID <= 0 || (index > 0 && session.ID <= previousID) {
+			return domain.UserSession{}, nil, newInternalError(nil)
 		}
-		ids[i] = session.ID
-	}
-	if !sort.SliceIsSorted(ids, func(i, j int) bool { return ids[i] < ids[j] }) {
-		return newInternalError(nil)
-	}
-	for i := 1; i < len(ids); i++ {
-		if ids[i] == ids[i-1] {
-			return newInternalError(nil)
+		previousID = session.ID
+		if !validAuthenticationSessionStructure(AuthenticationSession{
+			ID: session.ID, UserID: session.UserID, ExpiresAt: session.ExpiresAt,
+			RevokedAt: session.RevokedAt, CreatedAt: session.CreatedAt,
+		}, session.ID) {
+			return domain.UserSession{}, nil, newInternalError(nil)
 		}
+		if session.ID == actorSessionID {
+			if actorSession.ID != 0 {
+				return domain.UserSession{}, nil, newInternalError(nil)
+			}
+			if session.UserID != actorID {
+				return domain.UserSession{}, nil, ErrSessionInvalid
+			}
+			actorSession = session
+			continue
+		}
+		if session.UserID != targetID || session.RevokedAt != nil {
+			return domain.UserSession{}, nil, newInternalError(nil)
+		}
+		targetSessions = append(targetSessions, session)
 	}
-	return nil
+	if actorSession.ID == 0 {
+		return domain.UserSession{}, nil, ErrSessionInvalid
+	}
+	return actorSession, targetSessions, nil
 }
