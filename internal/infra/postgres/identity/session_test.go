@@ -197,6 +197,20 @@ func TestRevokeSessionTreatsZeroOrOneAffectedRowsAsSuccess(t *testing.T) {
 	}
 }
 
+func TestRevokeLockedSessionsRequiresEveryPreviouslyLockedRowToBeUpdated(t *testing.T) {
+	connection := &revokeSessionConnection{affectedRows: 0}
+	database := sql.OpenDB(revokeSessionConnector{connection: connection})
+	defer database.Close()
+
+	err := New(database).WithinTx(context.Background(), func(ctx context.Context, tx identityservice.Tx) error {
+		return tx.RevokeLockedSessions(ctx, []int64{84}, time.Date(2026, time.September, 2, 8, 30, 45, 0, time.UTC))
+	})
+
+	if !errors.Is(err, identityservice.ErrInternal) {
+		t.Fatalf("RevokeLockedSessions(0 affected rows) error = %v, want ErrInternal", err)
+	}
+}
+
 func normalizeSQLShape(value string) string {
 	return strings.Join(strings.Fields(value), " ")
 }
@@ -306,7 +320,7 @@ func (*revokeSessionConnection) Close() error {
 }
 
 func (*revokeSessionConnection) Begin() (driver.Tx, error) {
-	return nil, errors.New("transactions are not supported")
+	return revokeSessionDriverTx{}, nil
 }
 
 func (c *revokeSessionConnection) ExecContext(_ context.Context, query string, arguments []driver.NamedValue) (driver.Result, error) {
@@ -314,3 +328,8 @@ func (c *revokeSessionConnection) ExecContext(_ context.Context, query string, a
 	c.arguments = append([]driver.NamedValue(nil), arguments...)
 	return driver.RowsAffected(c.affectedRows), nil
 }
+
+type revokeSessionDriverTx struct{}
+
+func (revokeSessionDriverTx) Commit() error   { return nil }
+func (revokeSessionDriverTx) Rollback() error { return nil }

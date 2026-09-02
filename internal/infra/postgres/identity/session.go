@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -143,12 +144,20 @@ func (t *transaction) RotateSessionToken(ctx context.Context, sessionID int64, t
 
 func (t *transaction) RevokeLockedSessions(ctx context.Context, sessionIDs []int64, revokedAt time.Time) error {
 	for _, sessionID := range sortedUniqueIDs(sessionIDs) {
-		if _, err := t.tx.ExecContext(ctx, `
+		result, err := t.tx.ExecContext(ctx, `
 			UPDATE user_sessions
 			SET revoked_at = $2
 			WHERE id = $1
-			  AND revoked_at IS NULL`, sessionID, revokedAt); err != nil {
+			  AND revoked_at IS NULL`, sessionID, revokedAt)
+		if err != nil {
 			return repositoryInternalError(ctx, "revoke locked sessions", err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return repositoryInternalError(ctx, "revoke locked sessions", err)
+		}
+		if affected != 1 {
+			return repositoryInternalError(ctx, "revoke locked sessions", fmt.Errorf("unexpected affected row count: %d", affected))
 		}
 	}
 	return nil

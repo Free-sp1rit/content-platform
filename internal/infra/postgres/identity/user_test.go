@@ -10,7 +10,17 @@ import (
 	"time"
 
 	"github.com/Free-sp1rit/content-platform/internal/identity/domain"
+	identityservice "github.com/Free-sp1rit/content-platform/internal/identity/service"
 )
+
+func TestUserMutationHasChanges(t *testing.T) {
+	if userMutationHasChanges(identityservice.UserMutation{}) {
+		t.Fatal("empty user mutation reported changes")
+	}
+	if !userMutationHasChanges(identityservice.UserMutation{DeletedAt: identityservice.SetField[*time.Time](nil)}) {
+		t.Fatal("explicit NULL deleted_at mutation was treated as empty")
+	}
+}
 
 func TestFindUserUsesSecretFreeProjectionAndAlignedScanner(t *testing.T) {
 	mutedUntil := time.Date(2026, time.September, 4, 12, 13, 14, 0, time.UTC)

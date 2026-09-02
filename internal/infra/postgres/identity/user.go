@@ -110,6 +110,9 @@ func (t *transaction) LockUsers(ctx context.Context, userIDs []int64) ([]identit
 }
 
 func (t *transaction) UpdateUser(ctx context.Context, mutation identityservice.UserMutation) (domain.User, error) {
+	if mutation.UserID <= 0 || !userMutationHasChanges(mutation) {
+		return domain.User{}, repositoryInternalError(ctx, "update user", errors.New("invalid user mutation"))
+	}
 	user, err := scanUser(t.tx.QueryRowContext(ctx, `
 		UPDATE users
 		SET display_name = CASE WHEN $2::boolean THEN $3::text ELSE display_name END,
@@ -134,6 +137,11 @@ func (t *transaction) UpdateUser(ctx context.Context, mutation identityservice.U
 		return domain.User{}, classifyLookupError(ctx, "update user", err)
 	}
 	return user, nil
+}
+
+func userMutationHasChanges(mutation identityservice.UserMutation) bool {
+	return mutation.DisplayName.Set || mutation.Bio.Set || mutation.Status.Set || mutation.MutedUntil.Set ||
+		mutation.ViolationCount.Set || mutation.UpdatedAt.Set || mutation.DeletedAt.Set
 }
 
 func (t *transaction) RecoverExpiredMute(ctx context.Context, userID int64, now time.Time) (domain.User, bool, error) {

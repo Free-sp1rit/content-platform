@@ -15,6 +15,7 @@ var (
 	ErrInvalidCredentials          = errors.New("invalid credentials")
 	ErrInvalidRefreshToken         = errors.New("invalid refresh token")
 	ErrSessionInvalid              = errors.New("session invalid")
+	ErrUserFrozen                  = errors.New("user frozen")
 	ErrUserNotFound                = errors.New("user not found")
 )
 
@@ -24,6 +25,7 @@ const (
 	ValidationFieldEmail       ValidationField = "email"
 	ValidationFieldPassword    ValidationField = "password"
 	ValidationFieldDisplayName ValidationField = "display_name"
+	ValidationFieldBio         ValidationField = "bio"
 )
 
 type ValidationError struct {
