@@ -34,6 +34,7 @@ type Repository interface {
 	CreateUser(context.Context, CreateUserRecord) (domain.User, error)
 	FindLoginCredential(context.Context, string) (LoginCredential, error)
 	FindUser(context.Context, int64) (domain.User, error)
+	FindAuthenticationState(context.Context, int64) (AuthenticationState, error)
 	FindSessionOwner(context.Context, int64) (int64, error)
 	RevokeSession(context.Context, RevokeSessionRequest) error
 	WithinTx(context.Context, func(context.Context, Tx) error) error
@@ -71,6 +72,11 @@ type LoginCredential struct {
 	PasswordHash string
 	Status       domain.Status
 	DeletedAt    *time.Time
+}
+
+type AuthenticationState struct {
+	Session domain.UserSession
+	User    domain.User
 }
 
 type LockedUser = domain.User

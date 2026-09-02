@@ -14,6 +14,7 @@ var (
 	ErrEmailAlreadyRegistered      = errors.New("email already registered")
 	ErrInvalidCredentials          = errors.New("invalid credentials")
 	ErrInvalidRefreshToken         = errors.New("invalid refresh token")
+	ErrSessionInvalid              = errors.New("session invalid")
 )
 
 type ValidationField string

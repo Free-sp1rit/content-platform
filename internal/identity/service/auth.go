@@ -43,6 +43,142 @@ type RefreshResult struct {
 	RefreshExpiresAt time.Time
 }
 
+type AuthenticateInput struct {
+	UserID    int64
+	SessionID int64
+}
+
+type AuthenticateResult struct {
+	User domain.User
+}
+
+type LogoutInput struct {
+	UserID    int64
+	SessionID int64
+}
+
+type LogoutResult struct {
+	LoggedOut bool
+}
+
+func (s *Service) Authenticate(ctx context.Context, input AuthenticateInput) (AuthenticateResult, error) {
+	if input.UserID <= 0 || input.SessionID <= 0 {
+		return AuthenticateResult{}, ErrSessionInvalid
+	}
+	if ctx == nil {
+		return AuthenticateResult{}, newInternalError(nil)
+	}
+	if err := ctx.Err(); err != nil {
+		return AuthenticateResult{}, newInternalError(err)
+	}
+
+	state, err := s.repository.FindAuthenticationState(ctx, input.SessionID)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return AuthenticateResult{}, newInternalError(ctxErr)
+	}
+	if err != nil {
+		return AuthenticateResult{}, authenticationLookupError(err)
+	}
+	if !validAuthenticationSessionStructure(state.Session, input.SessionID) {
+		return AuthenticateResult{}, newInternalError(nil)
+	}
+	if state.Session.UserID != input.UserID || state.Session.RevokedAt != nil {
+		return AuthenticateResult{}, ErrSessionInvalid
+	}
+	if state.User.ID <= 0 || state.User.ID != state.Session.UserID {
+		return AuthenticateResult{}, newInternalError(nil)
+	}
+	if state.User.DeletedAt != nil {
+		return AuthenticateResult{}, ErrSessionInvalid
+	}
+	switch state.User.Status {
+	case domain.StatusBanned, domain.StatusDeleted:
+		return AuthenticateResult{}, ErrSessionInvalid
+	case domain.StatusMuted:
+		if state.User.MutedUntil == nil || !validAuthenticationTime(*state.User.MutedUntil) {
+			return AuthenticateResult{}, newInternalError(nil)
+		}
+	case domain.StatusPending, domain.StatusActive, domain.StatusFrozen:
+		if state.User.MutedUntil != nil {
+			return AuthenticateResult{}, newInternalError(nil)
+		}
+	default:
+		return AuthenticateResult{}, newInternalError(nil)
+	}
+
+	now, err := s.now()
+	if err != nil {
+		return AuthenticateResult{}, err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return AuthenticateResult{}, newInternalError(ctxErr)
+	}
+	if !domain.NormalizeTime(state.Session.ExpiresAt).After(now) {
+		return AuthenticateResult{}, ErrSessionInvalid
+	}
+
+	return AuthenticateResult{User: state.User}, nil
+}
+
+func authenticationLookupError(err error) error {
+	if internalContextMarker(err) != nil || errors.Is(err, ErrInternal) {
+		return newInternalError(err)
+	}
+	if errors.Is(err, ErrNotFound) {
+		return ErrSessionInvalid
+	}
+	return newInternalError(err)
+}
+
+func validAuthenticationSessionStructure(session domain.UserSession, sessionID int64) bool {
+	if session.ID <= 0 || session.ID != sessionID || session.UserID <= 0 || len(session.TokenHash) != 32 {
+		return false
+	}
+	if !validAuthenticationTime(session.CreatedAt) || !validAuthenticationTime(session.ExpiresAt) {
+		return false
+	}
+	return domain.NormalizeTime(session.ExpiresAt).After(domain.NormalizeTime(session.CreatedAt))
+}
+
+func validAuthenticationTime(value time.Time) bool {
+	normalized := domain.NormalizeTime(value)
+	if normalized.IsZero() {
+		return false
+	}
+	year := normalized.Year()
+	return year >= 0 && year <= 9999
+}
+
+func (s *Service) Logout(ctx context.Context, input LogoutInput) (LogoutResult, error) {
+	if input.UserID <= 0 || input.SessionID <= 0 {
+		return LogoutResult{}, newInternalError(nil)
+	}
+	if ctx == nil {
+		return LogoutResult{}, newInternalError(nil)
+	}
+	if err := ctx.Err(); err != nil {
+		return LogoutResult{}, newInternalError(err)
+	}
+
+	now, err := s.now()
+	if err != nil {
+		return LogoutResult{}, err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return LogoutResult{}, newInternalError(ctxErr)
+	}
+	err = s.repository.RevokeSession(ctx, RevokeSessionRequest{
+		UserID:    input.UserID,
+		SessionID: input.SessionID,
+		RevokedAt: now,
+	})
+	if err != nil {
+		return LogoutResult{}, newInternalError(err)
+	}
+
+	return LogoutResult{LoggedOut: true}, nil
+}
+
 func (s *Service) Refresh(ctx context.Context, input RefreshInput) (RefreshResult, error) {
 	sessionID, candidateHash, err := s.refreshTokenGenerator.Parse(input.RefreshToken)
 	if err != nil {

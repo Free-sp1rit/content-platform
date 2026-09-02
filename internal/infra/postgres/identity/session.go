@@ -11,6 +11,23 @@ import (
 
 const sessionColumns = `id, user_id, token_hash, expires_at, revoked_at, created_at`
 
+const authenticationStateQuery = `
+	SELECT
+		s.id, s.user_id, s.token_hash, s.expires_at, s.revoked_at, s.created_at,
+		u.id, u.email, u.password_hash, u.display_name, u.bio, u.role, u.status, u.muted_until,
+		u.violation_count, u.created_at, u.updated_at, u.deleted_at
+	FROM user_sessions AS s
+	JOIN users AS u ON u.id = s.user_id
+	WHERE s.id = $1`
+
+func (r *Repository) FindAuthenticationState(ctx context.Context, sessionID int64) (identityservice.AuthenticationState, error) {
+	state, err := scanAuthenticationState(r.db.QueryRowContext(ctx, authenticationStateQuery, sessionID))
+	if err != nil {
+		return identityservice.AuthenticationState{}, classifyLookupError(ctx, "find authentication state", err)
+	}
+	return state, nil
+}
+
 func (r *Repository) FindSessionOwner(ctx context.Context, sessionID int64) (int64, error) {
 	var userID int64
 	if err := r.db.QueryRowContext(ctx, `SELECT user_id FROM user_sessions WHERE id = $1`, sessionID).Scan(&userID); err != nil {
@@ -148,4 +165,29 @@ func scanSession(scanner rowScanner) (domain.UserSession, error) {
 		&session.CreatedAt,
 	)
 	return session, err
+}
+
+func scanAuthenticationState(scanner rowScanner) (identityservice.AuthenticationState, error) {
+	var state identityservice.AuthenticationState
+	err := scanner.Scan(
+		&state.Session.ID,
+		&state.Session.UserID,
+		&state.Session.TokenHash,
+		&state.Session.ExpiresAt,
+		&state.Session.RevokedAt,
+		&state.Session.CreatedAt,
+		&state.User.ID,
+		&state.User.Email,
+		&state.User.PasswordHash,
+		&state.User.DisplayName,
+		&state.User.Bio,
+		&state.User.Role,
+		&state.User.Status,
+		&state.User.MutedUntil,
+		&state.User.ViolationCount,
+		&state.User.CreatedAt,
+		&state.User.UpdatedAt,
+		&state.User.DeletedAt,
+	)
+	return state, err
 }

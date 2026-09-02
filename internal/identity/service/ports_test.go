@@ -27,6 +27,10 @@ func (repositoryPortStub) FindUser(context.Context, int64) (domain.User, error) 
 	return domain.User{}, nil
 }
 
+func (repositoryPortStub) FindAuthenticationState(context.Context, int64) (AuthenticationState, error) {
+	return AuthenticationState{}, nil
+}
+
 func (repositoryPortStub) FindSessionOwner(context.Context, int64) (int64, error) {
 	return 0, nil
 }
