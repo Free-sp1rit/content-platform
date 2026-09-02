@@ -15,6 +15,7 @@ import (
 func TestIdentityMigration(t *testing.T) {
 	// Do not call t.Parallel: migration.Run serializes goose's process-global state and this test runs DDL.
 	ctx, db, schema, directory := openIsolatedMigrationDatabase(t)
+	assertCurrentSchema(t, ctx, db, schema)
 	if err := migration.Run(ctx, db, directory, "up"); err != nil {
 		t.Fatalf("run migrations up: %v", err)
 	}
@@ -41,6 +42,17 @@ func TestIdentityMigration(t *testing.T) {
 	}
 	assertMigrationVersion(t, ctx, db, 2)
 	assertIdentityObjects(t, ctx, db, schema, true)
+}
+
+func assertCurrentSchema(t *testing.T, ctx context.Context, db *sql.DB, want string) {
+	t.Helper()
+	var got string
+	if err := db.QueryRowContext(ctx, "SELECT current_schema()").Scan(&got); err != nil {
+		t.Fatalf("read migration fixture schema: %v", err)
+	}
+	if got != want {
+		t.Fatalf("migration fixture schema = %q, want %q", got, want)
+	}
 }
 
 func assertMigrationVersion(t *testing.T, ctx context.Context, db *sql.DB, want int64) {

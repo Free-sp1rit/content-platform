@@ -10,22 +10,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Free-sp1rit/content-platform/internal/identity/domain"
 	identityservice "github.com/Free-sp1rit/content-platform/internal/identity/service"
-	"github.com/Free-sp1rit/content-platform/internal/infra/config"
-	"github.com/Free-sp1rit/content-platform/internal/infra/postgres"
 	identitypostgres "github.com/Free-sp1rit/content-platform/internal/infra/postgres/identity"
-	"github.com/Free-sp1rit/content-platform/internal/infra/postgres/migration"
 	"github.com/Free-sp1rit/content-platform/internal/testkit"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/stdlib"
 )
 
 const (
@@ -39,7 +32,8 @@ var _ identityservice.Repository = (*identitypostgres.Repository)(nil)
 
 func TestRepositoryIntegration(t *testing.T) {
 	// Do not call t.Parallel: this test creates schema-local DDL and exercises row locks.
-	ctx, db, repository := openRepositoryDatabase(t)
+	fixture, repository := openRepositoryDatabase(t)
+	ctx, db := fixture.Context, fixture.DB
 
 	t.Run("maps only the email unique constraint", func(t *testing.T) {
 		now := repositoryTestTime()
@@ -173,16 +167,10 @@ func TestRepositoryIntegration(t *testing.T) {
 		first := createRepositoryUser(t, testCtx, repository, repositoryUserRecord(t, "lock-user-first", now))
 		second := createRepositoryUser(t, testCtx, repository, repositoryUserRecord(t, "lock-user-second", now))
 		third := createRepositoryUser(t, testCtx, repository, repositoryUserRecord(t, "lock-user-third", now))
-		var schema string
-		if err := db.QueryRowContext(testCtx, "SELECT current_schema()").Scan(&schema); err != nil {
-			t.Fatalf("read current schema: %v", err)
-		}
 		candidateApplication := "identity_user_lock_" + randomRepositoryTestSuffix(t)
 		_, candidateRepository := openAdditionalRepositoryDatabase(
 			t,
-			testCtx,
-			testkit.DatabaseURL(t),
-			schema,
+			fixture,
 			candidateApplication,
 		)
 
@@ -297,16 +285,10 @@ func TestRepositoryIntegration(t *testing.T) {
 			t.Fatalf("prepare target revoked session: %v", err)
 		}
 		actorSession := createRepositorySession(t, testCtx, repository, actor.ID, hashByte(0x18), now, now.Add(time.Hour))
-		var schema string
-		if err := db.QueryRowContext(testCtx, "SELECT current_schema()").Scan(&schema); err != nil {
-			t.Fatalf("read current schema: %v", err)
-		}
 		candidateApplication := "identity_session_lock_" + randomRepositoryTestSuffix(t)
 		_, candidateRepository := openAdditionalRepositoryDatabase(
 			t,
-			testCtx,
-			testkit.DatabaseURL(t),
-			schema,
+			fixture,
 			candidateApplication,
 		)
 
@@ -423,16 +405,10 @@ func TestRepositoryIntegration(t *testing.T) {
 		rotatedHash := hashByte(0x1a)
 		revokedAt := now.Add(time.Minute)
 
-		var schema string
-		if err := db.QueryRowContext(testCtx, "SELECT current_schema()").Scan(&schema); err != nil {
-			t.Fatalf("read current schema: %v", err)
-		}
 		waiterApplication := "identity_session_epq_" + randomRepositoryTestSuffix(t)
 		_, waiterRepository := openAdditionalRepositoryDatabase(
 			t,
-			testCtx,
-			testkit.DatabaseURL(t),
-			schema,
+			fixture,
 			waiterApplication,
 		)
 
@@ -892,86 +868,22 @@ func TestRepositoryIntegration(t *testing.T) {
 	})
 }
 
-func openRepositoryDatabase(t *testing.T) (context.Context, *sql.DB, *identitypostgres.Repository) {
+func openRepositoryDatabase(t *testing.T) (*testkit.PostgresFixture, *identitypostgres.Repository) {
 	t.Helper()
-	databaseURL := testkit.DatabaseURL(t)
-	ctx, cancel := context.WithTimeout(context.Background(), repositoryIntegrationTimeout)
-	t.Cleanup(cancel)
-
-	adminDB, err := postgres.Open(ctx, config.DatabaseConfig{
-		URL:             databaseURL,
-		MaxOpenConns:    5,
-		MaxIdleConns:    2,
-		ConnMaxLifetime: time.Minute,
-		PingTimeout:     3 * time.Second,
+	fixture := testkit.OpenPostgresFixture(t, testkit.PostgresFixtureOptions{
+		SchemaPrefix:    "identity_repository_test",
+		Timeout:         repositoryIntegrationTimeout,
+		CleanupTimeout:  repositoryCleanupTimeout,
+		MaxOpenConns:    8,
+		MaxIdleConns:    4,
+		ApplyMigrations: true,
 	})
-	if err != nil {
-		t.Fatalf("postgres.Open() error = %v", err)
-	}
-
-	schema := "identity_repository_test_" + randomRepositoryTestSuffix(t)
-	if _, err := adminDB.ExecContext(ctx, "CREATE SCHEMA "+quoteIdentifier(schema)); err != nil {
-		_ = adminDB.Close()
-		t.Fatalf("create isolated schema: %v", err)
-	}
-	var db *sql.DB
-	t.Cleanup(func() {
-		if db != nil {
-			if err := db.Close(); err != nil {
-				t.Errorf("close isolated PostgreSQL pool: %v", err)
-			}
-		}
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), repositoryCleanupTimeout)
-		defer cleanupCancel()
-		if _, err := adminDB.ExecContext(cleanupCtx, "DROP SCHEMA IF EXISTS "+quoteIdentifier(schema)+" CASCADE"); err != nil {
-			t.Errorf("drop isolated schema: %v", err)
-		}
-		if err := adminDB.Close(); err != nil {
-			t.Errorf("close PostgreSQL admin connection: %v", err)
-		}
-	})
-
-	config, err := pgx.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatalf("parse isolated PostgreSQL configuration: %v", err)
-	}
-	config.RuntimeParams["search_path"] = schema
-	db = stdlib.OpenDB(*config)
-	db.SetMaxOpenConns(8)
-	db.SetMaxIdleConns(4)
-	db.SetConnMaxLifetime(time.Minute)
-	if err := db.PingContext(ctx); err != nil {
-		t.Fatalf("ping isolated PostgreSQL connection: %v", err)
-	}
-
-	if err := migration.Run(ctx, db, repositoryMigrationsDirectory(t), "up"); err != nil {
-		t.Fatalf("run identity migrations: %v", err)
-	}
-	return ctx, db, identitypostgres.New(db)
+	return fixture, identitypostgres.New(fixture.DB)
 }
 
-func openAdditionalRepositoryDatabase(t *testing.T, ctx context.Context, databaseURL, schema, applicationName string) (*sql.DB, *identitypostgres.Repository) {
+func openAdditionalRepositoryDatabase(t *testing.T, fixture *testkit.PostgresFixture, applicationName string) (*sql.DB, *identitypostgres.Repository) {
 	t.Helper()
-	config, err := pgx.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatalf("parse additional PostgreSQL configuration: %v", err)
-	}
-	config.RuntimeParams["search_path"] = schema
-	config.RuntimeParams["application_name"] = applicationName
-	db := stdlib.OpenDB(*config)
-	db.SetMaxOpenConns(2)
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(time.Minute)
-	t.Cleanup(func() {
-		if err := db.Close(); err != nil {
-			t.Errorf("close additional PostgreSQL pool: %v", err)
-		}
-	})
-	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	if err := db.PingContext(pingCtx); err != nil {
-		t.Fatalf("ping additional PostgreSQL connection: %v", err)
-	}
+	db := fixture.OpenPool(t, applicationName, 2, 1)
 	return db, identitypostgres.New(db)
 }
 
@@ -1006,15 +918,6 @@ func waitForApplicationLockWait[T any](ctx context.Context, db *sql.DB, applicat
 			return zero, false, fmt.Errorf("session lock candidate did not enter a PostgreSQL lock wait: %w", waitCtx.Err())
 		}
 	}
-}
-
-func repositoryMigrationsDirectory(t *testing.T) string {
-	t.Helper()
-	_, sourceFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller() could not locate integration test")
-	}
-	return filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "..", "..", "..", "..", "migrations"))
 }
 
 func repositoryUserRecord(t *testing.T, prefix string, now time.Time) identityservice.CreateUserRecord {
