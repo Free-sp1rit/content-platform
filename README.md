@@ -393,18 +393,22 @@ pgpass_mode="$(stat -Lc '%a' -- "$PGPASSFILE")" || {
 : "${ADMIN_EMAIL:?ADMIN_EMAIL is required}"
 psql --no-psqlrc --no-password \
   --set=ON_ERROR_STOP=1 --set=admin_email="$ADMIN_EMAIL" <<'SQL'
+BEGIN;
 UPDATE public.users
 SET role = 'admin',
     updated_at = date_trunc('second', CURRENT_TIMESTAMP)
 WHERE email = lower(btrim(:'admin_email'))
   AND role = 'user'
   AND status = 'active'
-  AND deleted_at IS NULL;
+  AND deleted_at IS NULL
+RETURNING id
+\gset admin_
+COMMIT;
 SQL
 )
 ```
 
-只有 `psql` 输出的 command tag 为 `UPDATE 1` 才算提升成功；shell/`psql` 退出码为 0 本身不构成成功。若输出 `UPDATE 0`，必须停止并调查邮箱归一化、用户状态/角色、目标环境和 writer 连接；不得把它当作成功，也不得绕过检查临时增加隐藏接口或白名单。任何大于 1 的结果同样必须停止并调查数据库完整性。
+提升脚本显式开启事务，并用 `UPDATE ... RETURNING id` 配合 `\gset` 要求恰好返回一行；成功路径的数据库 command tag 为 `UPDATE 1` 并提交。零行或多行会使 `\gset` 在 `ON_ERROR_STOP=1` 下失败，未提交的事务随后回滚并返回非零。出现异常必须停止并调查邮箱归一化、用户状态/角色、目标环境和 writer 连接；不得把 no-op 当作成功，也不得绕过检查临时增加隐藏接口或白名单。大于 `1` 还必须调查数据库完整性。
 
 ## 健康检查
 

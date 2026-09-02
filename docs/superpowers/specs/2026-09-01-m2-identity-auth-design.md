@@ -887,18 +887,22 @@ pgpass_mode="$(stat -Lc '%a' -- "$PGPASSFILE")" || {
 : "${ADMIN_EMAIL:?ADMIN_EMAIL is required}"
 psql --no-psqlrc --no-password \
   --set=ON_ERROR_STOP=1 --set=admin_email="$ADMIN_EMAIL" <<'SQL'
+BEGIN;
 UPDATE public.users
 SET role = 'admin',
     updated_at = date_trunc('second', CURRENT_TIMESTAMP)
 WHERE email = lower(btrim(:'admin_email'))
   AND role = 'user'
   AND status = 'active'
-  AND deleted_at IS NULL;
+  AND deleted_at IS NULL
+RETURNING id
+\gset admin_
+COMMIT;
 SQL
 )
 ```
 
-生产环境应通过受控 migration、运维脚本或数据库管理流程执行。只有 command tag `UPDATE 1` 算成功；shell/`psql` 退出码为 0 本身不够。`UPDATE 0` 必须停止并调查邮箱、角色/状态、目标环境和 writer 连接，不能当作成功；大于 1 同样必须停止并调查数据库完整性。
+生产环境应通过受控 migration、运维脚本或数据库管理流程执行。脚本显式开启事务，并用 `UPDATE ... RETURNING id` 配合 `\gset` 要求恰好返回一行；成功路径的数据库 command tag 为 `UPDATE 1` 并提交。零行或多行会使 `\gset` 在 `ON_ERROR_STOP=1` 下失败，未提交的事务随后回滚并返回非零。异常必须停止并调查邮箱、角色/状态、目标环境和 writer 连接，不能把 no-op 当作成功；大于 `1` 同样必须调查数据库完整性。
 
 ## 18. 测试策略
 
