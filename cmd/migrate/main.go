@@ -36,7 +36,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) (code int
 		return 2
 	}
 
-	cfg, err := config.Load()
+	cfg, err := loadMigrationConfig()
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "load configuration: %v\n", err)
 		return 1
@@ -70,4 +70,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) (code int
 	}
 	logger.Info("migration completed", "command", command)
 	return 0
+}
+
+func loadMigrationConfig() (config.MigrationConfig, error) {
+	return config.LoadMigration()
 }

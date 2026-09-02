@@ -33,6 +33,13 @@ type Config struct {
 	HTTP        HTTPConfig
 	Database    DatabaseConfig
 	Redis       RedisConfig
+	Auth        AuthConfig
+	Log         LogConfig
+}
+
+type MigrationConfig struct {
+	Environment Environment `env:"APP_ENV" envDefault:"local"`
+	Database    DatabaseConfig
 	Log         LogConfig
 }
 
@@ -60,6 +67,15 @@ type RedisConfig struct {
 	PingTimeout time.Duration `env:"REDIS_PING_TIMEOUT" envDefault:"2s"`
 }
 
+type AuthConfig struct {
+	JWTSecret       string        `env:"AUTH_JWT_SECRET"`
+	JWTIssuer       string        `env:"AUTH_JWT_ISSUER" envDefault:"content-platform"`
+	JWTAudience     string        `env:"AUTH_JWT_AUDIENCE" envDefault:"content-platform-api"`
+	AccessTokenTTL  time.Duration `env:"AUTH_ACCESS_TOKEN_TTL" envDefault:"15m"`
+	RefreshTokenTTL time.Duration `env:"AUTH_REFRESH_TOKEN_TTL" envDefault:"720h"`
+	BcryptCost      int           `env:"AUTH_BCRYPT_COST" envDefault:"12"`
+}
+
 type LogConfig struct {
 	Level  LogLevel  `env:"LOG_LEVEL" envDefault:"info"`
 	Format LogFormat `env:"LOG_FORMAT" envDefault:"json"`
@@ -77,11 +93,32 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
+func LoadMigration() (MigrationConfig, error) {
+	var cfg MigrationConfig
+	if err := env.Parse(&cfg); err != nil {
+		return MigrationConfig{}, fmt.Errorf("parse configuration: %w", err)
+	}
+	cfg.normalize()
+	if err := cfg.Validate(); err != nil {
+		return MigrationConfig{}, err
+	}
+	return cfg, nil
+}
+
 func (c *Config) normalize() {
 	c.Environment = Environment(strings.TrimSpace(string(c.Environment)))
 	c.HTTP.Address = strings.TrimSpace(c.HTTP.Address)
 	c.Database.URL = strings.TrimSpace(c.Database.URL)
 	c.Redis.Address = strings.TrimSpace(c.Redis.Address)
+	c.Auth.JWTIssuer = strings.TrimSpace(c.Auth.JWTIssuer)
+	c.Auth.JWTAudience = strings.TrimSpace(c.Auth.JWTAudience)
+	c.Log.Level = LogLevel(strings.ToLower(strings.TrimSpace(string(c.Log.Level))))
+	c.Log.Format = LogFormat(strings.ToLower(strings.TrimSpace(string(c.Log.Format))))
+}
+
+func (c *MigrationConfig) normalize() {
+	c.Environment = Environment(strings.TrimSpace(string(c.Environment)))
+	c.Database.URL = strings.TrimSpace(c.Database.URL)
 	c.Log.Level = LogLevel(strings.ToLower(strings.TrimSpace(string(c.Log.Level))))
 	c.Log.Format = LogFormat(strings.ToLower(strings.TrimSpace(string(c.Log.Format))))
 }
@@ -97,6 +134,22 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.Redis.Validate(); err != nil {
+		return err
+	}
+	if err := c.Auth.Validate(); err != nil {
+		return err
+	}
+	if err := c.Log.Validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c MigrationConfig) Validate() error {
+	if strings.TrimSpace(string(c.Environment)) == "" {
+		return fmt.Errorf("APP_ENV must not be empty")
+	}
+	if err := c.Database.Validate(); err != nil {
 		return err
 	}
 	if err := c.Log.Validate(); err != nil {

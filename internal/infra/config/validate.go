@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -66,6 +67,43 @@ func (c RedisConfig) Validate() error {
 	}
 	if c.PingTimeout <= 0 {
 		return fmt.Errorf("REDIS_PING_TIMEOUT must be greater than zero")
+	}
+	return nil
+}
+
+func (c AuthConfig) Validate() error {
+	if len(c.JWTSecret) < 32 {
+		return fmt.Errorf("AUTH_JWT_SECRET must be at least 32 bytes")
+	}
+	if strings.TrimSpace(c.JWTIssuer) == "" {
+		return fmt.Errorf("AUTH_JWT_ISSUER must not be empty")
+	}
+	if strings.TrimSpace(c.JWTAudience) == "" {
+		return fmt.Errorf("AUTH_JWT_AUDIENCE must not be empty")
+	}
+	if c.AccessTokenTTL <= 0 {
+		return fmt.Errorf("AUTH_ACCESS_TOKEN_TTL must be greater than zero")
+	}
+	if c.AccessTokenTTL < time.Second {
+		return fmt.Errorf("AUTH_ACCESS_TOKEN_TTL must be at least one second")
+	}
+	if c.AccessTokenTTL%time.Second != 0 {
+		return fmt.Errorf("AUTH_ACCESS_TOKEN_TTL must use whole-second precision")
+	}
+	if c.RefreshTokenTTL <= 0 {
+		return fmt.Errorf("AUTH_REFRESH_TOKEN_TTL must be greater than zero")
+	}
+	if c.RefreshTokenTTL < time.Second {
+		return fmt.Errorf("AUTH_REFRESH_TOKEN_TTL must be at least one second")
+	}
+	if c.RefreshTokenTTL%time.Second != 0 {
+		return fmt.Errorf("AUTH_REFRESH_TOKEN_TTL must use whole-second precision")
+	}
+	if c.RefreshTokenTTL <= c.AccessTokenTTL {
+		return fmt.Errorf("AUTH_REFRESH_TOKEN_TTL must be greater than AUTH_ACCESS_TOKEN_TTL")
+	}
+	if c.BcryptCost < 10 || c.BcryptCost > 15 {
+		return fmt.Errorf("AUTH_BCRYPT_COST must be between 10 and 15")
 	}
 	return nil
 }

@@ -4,39 +4,46 @@ package migration_test
 
 import (
 	"context"
-	"path/filepath"
-	"runtime"
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
 	"testing"
 	"time"
 
-	"github.com/Free-sp1rit/content-platform/internal/infra/config"
-	"github.com/Free-sp1rit/content-platform/internal/infra/postgres"
 	"github.com/Free-sp1rit/content-platform/internal/infra/postgres/migration"
 	"github.com/Free-sp1rit/content-platform/internal/testkit"
 )
 
-func TestBaselineMigrationIntegration(t *testing.T) {
-	db, err := postgres.Open(context.Background(), config.DatabaseConfig{
-		URL:             testkit.DatabaseURL(t),
-		MaxOpenConns:    5,
-		MaxIdleConns:    2,
-		ConnMaxLifetime: time.Minute,
-		PingTimeout:     3 * time.Second,
-	})
-	if err != nil {
-		t.Fatalf("postgres.Open() error = %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+const migrationIntegrationTimeout = 30 * time.Second
 
-	_, sourceFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller() could not locate integration test")
-	}
-	directory := filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "..", "..", "..", "..", "migrations"))
-	if err := migration.Run(context.Background(), db, directory, "up"); err != nil {
+func TestBaselineMigrationIntegration(t *testing.T) {
+	// Do not call t.Parallel: migration.Run serializes goose's process-global state and this test runs DDL.
+	ctx, db, _, directory := openIsolatedMigrationDatabase(t)
+	if err := migration.Run(ctx, db, directory, "up"); err != nil {
 		t.Fatalf("migration up error = %v", err)
 	}
-	if err := migration.Run(context.Background(), db, directory, "status"); err != nil {
+	if err := migration.Run(ctx, db, directory, "status"); err != nil {
 		t.Fatalf("migration status error = %v", err)
 	}
+}
+
+func openIsolatedMigrationDatabase(t *testing.T) (context.Context, *sql.DB, string, string) {
+	t.Helper()
+	fixture := testkit.OpenPostgresFixture(t, testkit.PostgresFixtureOptions{
+		SchemaPrefix:   "migration_test",
+		Timeout:        migrationIntegrationTimeout,
+		CleanupTimeout: migrationIntegrationTimeout,
+		MaxOpenConns:   5,
+		MaxIdleConns:   2,
+	})
+	return fixture.Context, fixture.DB, fixture.Schema, fixture.MigrationsDirectory
+}
+
+func randomMigrationTestSuffix(t *testing.T) string {
+	t.Helper()
+	var random [8]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		t.Fatalf("generate isolated test identifier: %v", err)
+	}
+	return hex.EncodeToString(random[:])
 }

@@ -52,10 +52,17 @@ func Run(ctx context.Context, db *sql.DB, directory, command string) error {
 	if err := goose.SetDialect("postgres"); err != nil {
 		return fmt.Errorf("set migration dialect: %w", err)
 	}
-	if err := goose.RunContext(ctx, command, db, directory); err != nil {
+	if err := goose.RunContext(ctx, gooseCommand(command), db, directory); err != nil {
 		return fmt.Errorf("run migration command %q: %w", command, err)
 	}
 	return nil
+}
+
+func gooseCommand(command string) string {
+	if command == "down-one" {
+		return "down"
+	}
+	return command
 }
 
 type slogLogger struct {

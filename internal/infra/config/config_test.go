@@ -24,13 +24,22 @@ var configEnvironmentKeys = []string{
 	"REDIS_PASSWORD",
 	"REDIS_DB",
 	"REDIS_PING_TIMEOUT",
+	"AUTH_JWT_SECRET",
+	"AUTH_JWT_ISSUER",
+	"AUTH_JWT_AUDIENCE",
+	"AUTH_ACCESS_TOKEN_TTL",
+	"AUTH_REFRESH_TOKEN_TTL",
+	"AUTH_BCRYPT_COST",
 	"LOG_LEVEL",
 	"LOG_FORMAT",
 }
 
+const validJWTSecret = "0123456789abcdef0123456789abcdef"
+
 func TestLoadUsesDefaults(t *testing.T) {
 	clearConfigEnvironment(t)
 	t.Setenv("DATABASE_URL", "postgres://postgres:postgres@localhost/content_platform?sslmode=disable")
+	t.Setenv("AUTH_JWT_SECRET", validJWTSecret)
 
 	cfg, err := Load()
 	if err != nil {
@@ -48,6 +57,24 @@ func TestLoadUsesDefaults(t *testing.T) {
 	}
 	if cfg.Database.MaxOpenConns != 20 {
 		t.Fatalf("Database.MaxOpenConns = %d, want %d", cfg.Database.MaxOpenConns, 20)
+	}
+	if cfg.Auth.JWTSecret != validJWTSecret {
+		t.Fatal("Auth.JWTSecret did not preserve configured value")
+	}
+	if cfg.Auth.JWTIssuer != "content-platform" {
+		t.Fatalf("Auth.JWTIssuer = %q, want %q", cfg.Auth.JWTIssuer, "content-platform")
+	}
+	if cfg.Auth.JWTAudience != "content-platform-api" {
+		t.Fatalf("Auth.JWTAudience = %q, want %q", cfg.Auth.JWTAudience, "content-platform-api")
+	}
+	if cfg.Auth.AccessTokenTTL != 15*time.Minute {
+		t.Fatalf("Auth.AccessTokenTTL = %v, want %v", cfg.Auth.AccessTokenTTL, 15*time.Minute)
+	}
+	if cfg.Auth.RefreshTokenTTL != 720*time.Hour {
+		t.Fatalf("Auth.RefreshTokenTTL = %v, want %v", cfg.Auth.RefreshTokenTTL, 720*time.Hour)
+	}
+	if cfg.Auth.BcryptCost != 12 {
+		t.Fatalf("Auth.BcryptCost = %d, want %d", cfg.Auth.BcryptCost, 12)
 	}
 	if cfg.Log.Level != LogLevelInfo {
 		t.Fatalf("Log.Level = %q, want %q", cfg.Log.Level, LogLevelInfo)
@@ -76,6 +103,12 @@ func TestLoadParsesEnvironment(t *testing.T) {
 		"REDIS_PASSWORD":             "secret",
 		"REDIS_DB":                   "4",
 		"REDIS_PING_TIMEOUT":         "9s",
+		"AUTH_JWT_SECRET":            "configured-jwt-secret-0123456789abcdef",
+		"AUTH_JWT_ISSUER":            "identity-service",
+		"AUTH_JWT_AUDIENCE":          "content-clients",
+		"AUTH_ACCESS_TOKEN_TTL":      "20m",
+		"AUTH_REFRESH_TOKEN_TTL":     "48h",
+		"AUTH_BCRYPT_COST":           "15",
 		"LOG_LEVEL":                  "debug",
 		"LOG_FORMAT":                 "text",
 	}
@@ -109,6 +142,24 @@ func TestLoadParsesEnvironment(t *testing.T) {
 	if cfg.Redis.DB != 4 {
 		t.Fatalf("Redis.DB = %d, want %d", cfg.Redis.DB, 4)
 	}
+	if cfg.Auth.JWTSecret != environment["AUTH_JWT_SECRET"] {
+		t.Fatal("Auth.JWTSecret did not preserve configured value")
+	}
+	if cfg.Auth.JWTIssuer != "identity-service" {
+		t.Fatalf("Auth.JWTIssuer = %q, want %q", cfg.Auth.JWTIssuer, "identity-service")
+	}
+	if cfg.Auth.JWTAudience != "content-clients" {
+		t.Fatalf("Auth.JWTAudience = %q, want %q", cfg.Auth.JWTAudience, "content-clients")
+	}
+	if cfg.Auth.AccessTokenTTL != 20*time.Minute {
+		t.Fatalf("Auth.AccessTokenTTL = %v, want %v", cfg.Auth.AccessTokenTTL, 20*time.Minute)
+	}
+	if cfg.Auth.RefreshTokenTTL != 48*time.Hour {
+		t.Fatalf("Auth.RefreshTokenTTL = %v, want %v", cfg.Auth.RefreshTokenTTL, 48*time.Hour)
+	}
+	if cfg.Auth.BcryptCost != 15 {
+		t.Fatalf("Auth.BcryptCost = %d, want %d", cfg.Auth.BcryptCost, 15)
+	}
 	if cfg.Log.Level != LogLevelDebug {
 		t.Fatalf("Log.Level = %q, want %q", cfg.Log.Level, LogLevelDebug)
 	}
@@ -119,11 +170,15 @@ func TestLoadParsesEnvironment(t *testing.T) {
 
 func TestLoadNormalizesNonSecretStringsAndPreservesPassword(t *testing.T) {
 	clearConfigEnvironment(t)
+	jwtSecret := " 0123456789abcdef0123456789abcdef "
 	t.Setenv("APP_ENV", " Staging-Blue ")
 	t.Setenv("HTTP_ADDR", " :9090 ")
 	t.Setenv("DATABASE_URL", " postgres://localhost/custom ")
 	t.Setenv("REDIS_ADDR", " redis.example:6380 ")
 	t.Setenv("REDIS_PASSWORD", " secret with spaces ")
+	t.Setenv("AUTH_JWT_SECRET", jwtSecret)
+	t.Setenv("AUTH_JWT_ISSUER", " identity-service ")
+	t.Setenv("AUTH_JWT_AUDIENCE", " content-clients ")
 	t.Setenv("LOG_LEVEL", " WARN ")
 	t.Setenv("LOG_FORMAT", " TEXT ")
 
@@ -147,6 +202,15 @@ func TestLoadNormalizesNonSecretStringsAndPreservesPassword(t *testing.T) {
 	if cfg.Redis.Password != " secret with spaces " {
 		t.Fatal("Redis.Password was modified")
 	}
+	if cfg.Auth.JWTSecret != jwtSecret {
+		t.Fatal("Auth.JWTSecret was modified")
+	}
+	if cfg.Auth.JWTIssuer != "identity-service" {
+		t.Fatalf("Auth.JWTIssuer = %q, want %q", cfg.Auth.JWTIssuer, "identity-service")
+	}
+	if cfg.Auth.JWTAudience != "content-clients" {
+		t.Fatalf("Auth.JWTAudience = %q, want %q", cfg.Auth.JWTAudience, "content-clients")
+	}
 	if cfg.Log.Level != LogLevelWarn {
 		t.Fatalf("Log.Level = %q, want %q", cfg.Log.Level, LogLevelWarn)
 	}
@@ -164,12 +228,15 @@ func TestLoadRejectsParserErrors(t *testing.T) {
 		{name: "invalid HTTP duration", key: "HTTP_READ_TIMEOUT", value: "not-a-duration"},
 		{name: "invalid database pool size", key: "DATABASE_MAX_OPEN_CONNS", value: "many"},
 		{name: "invalid Redis database", key: "REDIS_DB", value: "db-zero"},
+		{name: "invalid auth duration", key: "AUTH_ACCESS_TOKEN_TTL", value: "not-a-duration"},
+		{name: "invalid bcrypt cost", key: "AUTH_BCRYPT_COST", value: "expensive"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			clearConfigEnvironment(t)
 			t.Setenv("DATABASE_URL", "postgres://localhost/content_platform")
+			t.Setenv("AUTH_JWT_SECRET", validJWTSecret)
 			t.Setenv(tt.key, tt.value)
 
 			_, err := Load()
@@ -194,11 +261,19 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{name: "idle exceeds open", env: map[string]string{"DATABASE_URL": "postgres://localhost/db", "DATABASE_MAX_OPEN_CONNS": "2", "DATABASE_MAX_IDLE_CONNS": "3"}, wantErr: "DATABASE_MAX_IDLE_CONNS"},
 		{name: "zero shutdown timeout", env: map[string]string{"DATABASE_URL": "postgres://localhost/db", "HTTP_SHUTDOWN_TIMEOUT": "0s"}, wantErr: "HTTP_SHUTDOWN_TIMEOUT"},
 		{name: "negative Redis database", env: map[string]string{"DATABASE_URL": "postgres://localhost/db", "REDIS_DB": "-1"}, wantErr: "REDIS_DB"},
+		{name: "missing JWT secret", env: map[string]string{"DATABASE_URL": "postgres://localhost/db", "AUTH_JWT_SECRET": ""}, wantErr: "AUTH_JWT_SECRET"},
+		{name: "31 byte JWT secret", env: map[string]string{"DATABASE_URL": "postgres://localhost/db", "AUTH_JWT_SECRET": "1234567890123456789012345678901"}, wantErr: "AUTH_JWT_SECRET"},
+		{name: "blank JWT issuer", env: map[string]string{"DATABASE_URL": "postgres://localhost/db", "AUTH_JWT_ISSUER": " "}, wantErr: "AUTH_JWT_ISSUER"},
+		{name: "blank JWT audience", env: map[string]string{"DATABASE_URL": "postgres://localhost/db", "AUTH_JWT_AUDIENCE": " "}, wantErr: "AUTH_JWT_AUDIENCE"},
+		{name: "equal token TTLs", env: map[string]string{"DATABASE_URL": "postgres://localhost/db", "AUTH_ACCESS_TOKEN_TTL": "1h", "AUTH_REFRESH_TOKEN_TTL": "1h"}, wantErr: "AUTH_REFRESH_TOKEN_TTL"},
+		{name: "bcrypt cost below range", env: map[string]string{"DATABASE_URL": "postgres://localhost/db", "AUTH_BCRYPT_COST": "9"}, wantErr: "AUTH_BCRYPT_COST"},
+		{name: "bcrypt cost above range", env: map[string]string{"DATABASE_URL": "postgres://localhost/db", "AUTH_BCRYPT_COST": "16"}, wantErr: "AUTH_BCRYPT_COST"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			clearConfigEnvironment(t)
+			t.Setenv("AUTH_JWT_SECRET", validJWTSecret)
 			for key, value := range tt.env {
 				t.Setenv(key, value)
 			}
