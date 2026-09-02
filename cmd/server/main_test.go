@@ -25,7 +25,8 @@ func TestRunReportsConfigurationFailure(t *testing.T) {
 
 func TestRunRequiresAuthenticationConfig(t *testing.T) {
 	resetServerConfigEnvironment(t)
-	t.Setenv("DATABASE_URL", "postgres://localhost/content_platform")
+	databaseURL := "postgres://db-user:db-password-do-not-log@localhost/content_platform"
+	t.Setenv("DATABASE_URL", databaseURL)
 	var stderr bytes.Buffer
 
 	code := run(context.Background(), io.Discard, &stderr)
@@ -35,6 +36,9 @@ func TestRunRequiresAuthenticationConfig(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "AUTH_JWT_SECRET") {
 		t.Fatalf("run() stderr = %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), databaseURL) || strings.Contains(stderr.String(), "db-password-do-not-log") {
+		t.Fatalf("run() leaked database configuration: %q", stderr.String())
 	}
 }
 

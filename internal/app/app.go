@@ -10,9 +10,16 @@ import (
 	"sync"
 	"time"
 
+	identityhandler "github.com/Free-sp1rit/content-platform/internal/identity/handler"
+	identityservice "github.com/Free-sp1rit/content-platform/internal/identity/service"
+	"github.com/Free-sp1rit/content-platform/internal/infra/clock"
 	"github.com/Free-sp1rit/content-platform/internal/infra/config"
+	"github.com/Free-sp1rit/content-platform/internal/infra/password"
 	"github.com/Free-sp1rit/content-platform/internal/infra/postgres"
+	identitypostgres "github.com/Free-sp1rit/content-platform/internal/infra/postgres/identity"
 	redisinfra "github.com/Free-sp1rit/content-platform/internal/infra/redis"
+	"github.com/Free-sp1rit/content-platform/internal/infra/token"
+	"github.com/Free-sp1rit/content-platform/internal/platform/authn"
 	systemhandler "github.com/Free-sp1rit/content-platform/internal/system/handler"
 	systemservice "github.com/Free-sp1rit/content-platform/internal/system/service"
 	goredis "github.com/redis/go-redis/v9"
@@ -50,6 +57,41 @@ func newWithDependencies(ctx context.Context, cfg config.Config, logger *slog.Lo
 	if err != nil {
 		return nil, fmt.Errorf("initialize PostgreSQL: %w", err)
 	}
+	closeDatabase := true
+	defer func() {
+		if closeDatabase {
+			_ = db.Close()
+		}
+	}()
+
+	passwordHasher, err := password.New(cfg.Auth.BcryptCost)
+	if err != nil {
+		return nil, fmt.Errorf("initialize password hashing: %w", err)
+	}
+	accessManager, err := token.NewAccessManager(
+		cfg.Auth.JWTSecret,
+		cfg.Auth.JWTIssuer,
+		cfg.Auth.JWTAudience,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("initialize access tokens: %w", err)
+	}
+	serviceClock := clock.System{}
+	identityService, err := identityservice.New(identityservice.Dependencies{
+		Repository:            identitypostgres.New(db),
+		PasswordHasher:        passwordHasher,
+		AccessTokenManager:    accessManager,
+		RefreshTokenGenerator: token.NewRefreshCodec(),
+		Clock:                 serviceClock,
+	}, identityservice.Config{
+		AccessTokenTTL:  cfg.Auth.AccessTokenTTL,
+		RefreshTokenTTL: cfg.Auth.RefreshTokenTTL,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("initialize identity service: %w", err)
+	}
+	identityHandler := identityhandler.New(identityService, logger)
+	authenticate := authn.Middleware(accessManager, serviceClock, identityHandler.RejectAccessToken)
 
 	redisClient := deps.newRedis(cfg.Redis)
 	pingContext, cancel := context.WithTimeout(ctx, cfg.Redis.PingTimeout)
@@ -68,17 +110,19 @@ func newWithDependencies(ctx context.Context, cfg config.Config, logger *slog.Lo
 	healthHandler := systemhandler.New(healthService)
 	server := &http.Server{
 		Addr:              cfg.HTTP.Address,
-		Handler:           Routes(logger, healthHandler),
+		Handler:           Routes(logger, healthHandler, identityHandler, authenticate),
 		ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout,
 		ReadTimeout:       cfg.HTTP.ReadTimeout,
 		WriteTimeout:      cfg.HTTP.WriteTimeout,
 		IdleTimeout:       cfg.HTTP.IdleTimeout,
 	}
 
-	return &App{
+	application := &App{
 		server:          server,
 		logger:          logger,
 		shutdownTimeout: cfg.HTTP.ShutdownTimeout,
 		closers:         []io.Closer{redisClient, db},
-	}, nil
+	}
+	closeDatabase = false
+	return application, nil
 }
