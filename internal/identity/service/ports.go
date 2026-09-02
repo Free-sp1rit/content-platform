@@ -75,8 +75,16 @@ type LoginCredential struct {
 }
 
 type AuthenticationState struct {
-	Session domain.UserSession
+	Session AuthenticationSession
 	User    domain.User
+}
+
+type AuthenticationSession struct {
+	ID        int64
+	UserID    int64
+	ExpiresAt time.Time
+	RevokedAt *time.Time
+	CreatedAt time.Time
 }
 
 type LockedUser = domain.User

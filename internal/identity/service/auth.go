@@ -62,6 +62,10 @@ type LogoutResult struct {
 }
 
 func (s *Service) Authenticate(ctx context.Context, input AuthenticateInput) (AuthenticateResult, error) {
+	return s.authenticate(ctx, input, "")
+}
+
+func (s *Service) authenticate(ctx context.Context, input AuthenticateInput, requestID string) (AuthenticateResult, error) {
 	if input.UserID <= 0 || input.SessionID <= 0 {
 		return AuthenticateResult{}, ErrSessionInvalid
 	}
@@ -85,25 +89,8 @@ func (s *Service) Authenticate(ctx context.Context, input AuthenticateInput) (Au
 	if state.Session.UserID != input.UserID || state.Session.RevokedAt != nil {
 		return AuthenticateResult{}, ErrSessionInvalid
 	}
-	if state.User.ID <= 0 || state.User.ID != state.Session.UserID {
-		return AuthenticateResult{}, newInternalError(nil)
-	}
-	if state.User.DeletedAt != nil {
-		return AuthenticateResult{}, ErrSessionInvalid
-	}
-	switch state.User.Status {
-	case domain.StatusBanned, domain.StatusDeleted:
-		return AuthenticateResult{}, ErrSessionInvalid
-	case domain.StatusMuted:
-		if state.User.MutedUntil == nil || !validAuthenticationTime(*state.User.MutedUntil) {
-			return AuthenticateResult{}, newInternalError(nil)
-		}
-	case domain.StatusPending, domain.StatusActive, domain.StatusFrozen:
-		if state.User.MutedUntil != nil {
-			return AuthenticateResult{}, newInternalError(nil)
-		}
-	default:
-		return AuthenticateResult{}, newInternalError(nil)
+	if err := strictAuthenticationUserError(state.User, state.Session.UserID, true); err != nil {
+		return AuthenticateResult{}, err
 	}
 
 	now, err := s.now()
@@ -117,7 +104,21 @@ func (s *Service) Authenticate(ctx context.Context, input AuthenticateInput) (Au
 		return AuthenticateResult{}, ErrSessionInvalid
 	}
 
-	return AuthenticateResult{User: state.User}, nil
+	user := state.User
+	if shouldRecoverExpiredMute(user, now) {
+		user, err = s.recoverExpiredMuteAfterRead(ctx, user, now, requestID)
+		if err != nil {
+			if err == ErrNotFound {
+				return AuthenticateResult{}, ErrSessionInvalid
+			}
+			return AuthenticateResult{}, newInternalError(err)
+		}
+		if err := strictAuthenticationUserError(user, input.UserID, true); err != nil {
+			return AuthenticateResult{}, err
+		}
+	}
+
+	return AuthenticateResult{User: secretFreeUser(user)}, nil
 }
 
 func authenticationLookupError(err error) error {
@@ -130,14 +131,18 @@ func authenticationLookupError(err error) error {
 	return newInternalError(err)
 }
 
-func validAuthenticationSessionStructure(session domain.UserSession, sessionID int64) bool {
-	if session.ID <= 0 || session.ID != sessionID || session.UserID <= 0 || len(session.TokenHash) != 32 {
+func validAuthenticationSessionStructure(session AuthenticationSession, sessionID int64) bool {
+	if session.ID <= 0 || session.ID != sessionID || session.UserID <= 0 {
 		return false
 	}
 	if !validAuthenticationTime(session.CreatedAt) || !validAuthenticationTime(session.ExpiresAt) {
 		return false
 	}
 	return domain.NormalizeTime(session.ExpiresAt).After(domain.NormalizeTime(session.CreatedAt))
+}
+
+func validUserRole(role domain.Role) bool {
+	return role == domain.RoleUser || role == domain.RoleAdmin
 }
 
 func validAuthenticationTime(value time.Time) bool {

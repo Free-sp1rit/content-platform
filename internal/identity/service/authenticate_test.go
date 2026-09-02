@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -58,12 +60,17 @@ func TestAuthenticateReturnsLatestUserForAllowedStatuses(t *testing.T) {
 	}
 }
 
-func TestAuthenticateAllowsExpiredMutedStateWithoutPrematureRecovery(t *testing.T) {
-	state := validAuthenticationState(authenticateNow, domain.StatusMuted)
-	expiredMutedUntil := authenticateNow.Add(-time.Second)
-	state.User.MutedUntil = &expiredMutedUntil
-	repository := &authenticateRepositoryFake{state: state}
-	service := &Service{repository: repository, clock: &authenticateClockSpy{now: authenticateNow}}
+func TestAuthenticationStateUsesSecretFreeReadModels(t *testing.T) {
+	sessionType := reflect.TypeOf(AuthenticationSession{})
+	if _, ok := sessionType.FieldByName("TokenHash"); ok {
+		t.Fatal("AuthenticationSession exposes TokenHash")
+	}
+
+	state := validAuthenticationState(authenticateNow, domain.StatusActive)
+	service := &Service{
+		repository: &authenticateRepositoryFake{state: state},
+		clock:      &authenticateClockSpy{now: authenticateNow},
+	}
 
 	result, err := service.Authenticate(context.Background(), AuthenticateInput{
 		UserID:    authenticateUserID,
@@ -71,13 +78,10 @@ func TestAuthenticateAllowsExpiredMutedStateWithoutPrematureRecovery(t *testing.
 	})
 
 	if err != nil {
-		t.Fatalf("Authenticate(expired mute) error type = %T, want nil", err)
+		t.Fatalf("Authenticate() error type = %T, want nil", err)
 	}
-	if result.User != state.User || result.User.Status != domain.StatusMuted || result.User.MutedUntil == nil || !result.User.MutedUntil.Equal(expiredMutedUntil) {
-		t.Fatal("Authenticate() changed or rejected the latest expired-muted user before the profile recovery task")
-	}
-	if repository.authenticationCalls != 1 || repository.unexpectedCalls != 0 {
-		t.Fatalf("repository calls: auth=%d unexpected=%d", repository.authenticationCalls, repository.unexpectedCalls)
+	if result.User.PasswordHash != "" {
+		t.Fatal("AuthenticateResult propagated a password hash from the strict-auth read model")
 	}
 }
 
@@ -181,10 +185,14 @@ func TestAuthenticateTreatsDamagedReadModelsAsInternal(t *testing.T) {
 			state.Session.ExpiresAt = time.Date(10000, time.January, 1, 0, 0, 0, 0, time.UTC)
 		}},
 		{name: "zero session creation", mutate: func(state *AuthenticationState) { state.Session.CreatedAt = time.Time{} }},
-		{name: "invalid token hash length", mutate: func(state *AuthenticationState) { state.Session.TokenHash = make([]byte, 31) }},
 		{name: "expiry does not follow creation", mutate: func(state *AuthenticationState) { state.Session.ExpiresAt = state.Session.CreatedAt }},
 		{name: "zero user ID", mutate: func(state *AuthenticationState) { state.User.ID = 0 }},
 		{name: "wrong returned user ID", mutate: func(state *AuthenticationState) { state.User.ID++ }},
+		{name: "empty user role", mutate: func(state *AuthenticationState) { state.User.Role = "" }},
+		{name: "unknown user role", mutate: func(state *AuthenticationState) { state.User.Role = domain.Role("secret-role") }},
+		{name: "password hash in safe user model", mutate: func(state *AuthenticationState) {
+			state.User.PasswordHash = "password-hash-do-not-log"
+		}},
 		{name: "unknown user status", mutate: func(state *AuthenticationState) { state.User.Status = domain.Status("secret-status") }},
 		{name: "muted user missing muted until", mutate: func(state *AuthenticationState) {
 			state.User.Status = domain.StatusMuted
@@ -219,6 +227,65 @@ func TestAuthenticateTreatsDamagedReadModelsAsInternal(t *testing.T) {
 			assertAuthenticateErrorSafe(t, err)
 		})
 	}
+}
+
+func TestAuthenticationLookupErrorPrioritizesContextAndInternalOverNotFound(t *testing.T) {
+	privateCause := errors.New("private database token hash")
+	tests := []struct {
+		name        string
+		repository  error
+		wantContext error
+	}{
+		{
+			name:        "joined canceled and not found",
+			repository:  errors.Join(ErrNotFound, context.Canceled),
+			wantContext: context.Canceled,
+		},
+		{
+			name:        "joined deadline and not found",
+			repository:  errors.Join(ErrNotFound, context.DeadlineExceeded),
+			wantContext: context.DeadlineExceeded,
+		},
+		{
+			name:       "joined internal and not found",
+			repository: errors.Join(ErrNotFound, newInternalError(privateCause)),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &Service{
+				repository: &authenticateRepositoryFake{err: tt.repository},
+				clock:      &authenticateClockSpy{now: authenticateNow},
+			}
+
+			result, err := service.Authenticate(context.Background(), AuthenticateInput{
+				UserID:    authenticateUserID,
+				SessionID: authenticateSessionID,
+			})
+
+			assertAuthenticateInternalFailure(t, result, err, tt.wantContext)
+			if errors.Is(err, privateCause) || strings.Contains(err.Error(), privateCause.Error()) {
+				t.Fatal("Authenticate() exposed a private joined lookup cause")
+			}
+		})
+	}
+
+	t.Run("ordinary wrapped not found remains exact session invalid", func(t *testing.T) {
+		service := &Service{
+			repository: &authenticateRepositoryFake{err: fmt.Errorf("lookup wrapper: %w", ErrNotFound)},
+			clock:      &authenticateClockSpy{now: authenticateNow},
+		}
+
+		result, err := service.Authenticate(context.Background(), AuthenticateInput{
+			UserID:    authenticateUserID,
+			SessionID: authenticateSessionID,
+		})
+
+		if err != ErrSessionInvalid || result != (AuthenticateResult{}) {
+			t.Fatalf("Authenticate(wrapped not found) returned result/error %#v/%T, want zero/exact ErrSessionInvalid", result, err)
+		}
+	})
 }
 
 func TestAuthenticateFoldsRepositoryClockAndContextFailuresToInternal(t *testing.T) {
@@ -341,7 +408,6 @@ func validAuthenticationState(now time.Time, status domain.Status) Authenticatio
 	user := domain.User{
 		ID:             authenticateUserID,
 		Email:          "latest@example.com",
-		PasswordHash:   "password-hash-do-not-log",
 		DisplayName:    "Latest User",
 		Bio:            "latest bio",
 		Role:           domain.RoleUser,
@@ -354,10 +420,9 @@ func validAuthenticationState(now time.Time, status domain.Status) Authenticatio
 		user.MutedUntil = &mutedUntil
 	}
 	return AuthenticationState{
-		Session: domain.UserSession{
+		Session: AuthenticationSession{
 			ID:        authenticateSessionID,
 			UserID:    authenticateUserID,
-			TokenHash: make([]byte, 32),
 			ExpiresAt: now.Add(time.Hour),
 			CreatedAt: now.Add(-time.Hour),
 		},

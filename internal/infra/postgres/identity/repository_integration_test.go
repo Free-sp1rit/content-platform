@@ -114,7 +114,7 @@ func TestRepositoryIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("FindUser() error = %v", err)
 		}
-		assertUsersEqual(t, found, user)
+		assertSafeUsersEqual(t, found, user)
 
 		session := createRepositorySession(t, ctx, repository, user.ID, hashByte(0x11), now, now.Add(2*time.Hour))
 		owner, err := repository.FindSessionOwner(ctx, session.ID)
@@ -1084,7 +1084,7 @@ func updateRepositoryUser(t *testing.T, ctx context.Context, repository identity
 	return updated
 }
 
-func assertUsersEqual(t *testing.T, got, want domain.User) {
+func assertSafeUsersEqual(t *testing.T, got, want domain.User) {
 	t.Helper()
 	if got.ID != want.ID {
 		t.Fatalf("user ID = %d, want %d", got.ID, want.ID)
@@ -1092,8 +1092,8 @@ func assertUsersEqual(t *testing.T, got, want domain.User) {
 	if got.Email != want.Email {
 		t.Fatal("user email did not match")
 	}
-	if got.PasswordHash != want.PasswordHash {
-		t.Fatal("user password_hash did not match")
+	if got.PasswordHash != "" {
+		t.Fatal("safe user read populated password_hash")
 	}
 	if got.DisplayName != want.DisplayName || got.Bio != want.Bio {
 		t.Fatal("user profile fields did not match")

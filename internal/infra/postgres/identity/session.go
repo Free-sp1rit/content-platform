@@ -13,8 +13,8 @@ const sessionColumns = `id, user_id, token_hash, expires_at, revoked_at, created
 
 const authenticationStateQuery = `
 	SELECT
-		s.id, s.user_id, s.token_hash, s.expires_at, s.revoked_at, s.created_at,
-		u.id, u.email, u.password_hash, u.display_name, u.bio, u.role, u.status, u.muted_until,
+		s.id, s.user_id, s.expires_at, s.revoked_at, s.created_at,
+		u.id, u.email, u.display_name, u.bio, u.role, u.status, u.muted_until,
 		u.violation_count, u.created_at, u.updated_at, u.deleted_at
 	FROM user_sessions AS s
 	JOIN users AS u ON u.id = s.user_id
@@ -172,13 +172,11 @@ func scanAuthenticationState(scanner rowScanner) (identityservice.Authentication
 	err := scanner.Scan(
 		&state.Session.ID,
 		&state.Session.UserID,
-		&state.Session.TokenHash,
 		&state.Session.ExpiresAt,
 		&state.Session.RevokedAt,
 		&state.Session.CreatedAt,
 		&state.User.ID,
 		&state.User.Email,
-		&state.User.PasswordHash,
 		&state.User.DisplayName,
 		&state.User.Bio,
 		&state.User.Role,

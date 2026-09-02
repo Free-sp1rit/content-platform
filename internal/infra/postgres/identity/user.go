@@ -16,6 +16,10 @@ const userColumns = `
 	id, email, password_hash, display_name, bio, role, status, muted_until,
 	violation_count, created_at, updated_at, deleted_at`
 
+const safeUserColumns = `
+	id, email, display_name, bio, role, status, muted_until,
+	violation_count, created_at, updated_at, deleted_at`
+
 type rowScanner interface {
 	Scan(...any) error
 }
@@ -64,7 +68,7 @@ func (r *Repository) FindLoginCredential(ctx context.Context, email string) (ide
 }
 
 func (r *Repository) FindUser(ctx context.Context, userID int64) (domain.User, error) {
-	user, err := scanUser(r.db.QueryRowContext(ctx, `SELECT `+userColumns+` FROM users WHERE id = $1`, userID))
+	user, err := scanSafeUser(r.db.QueryRowContext(ctx, `SELECT `+safeUserColumns+` FROM users WHERE id = $1`, userID))
 	if err != nil {
 		return domain.User{}, classifyLookupError(ctx, "find user", err)
 	}
@@ -155,6 +159,24 @@ func scanUser(scanner rowScanner) (domain.User, error) {
 		&user.ID,
 		&user.Email,
 		&user.PasswordHash,
+		&user.DisplayName,
+		&user.Bio,
+		&user.Role,
+		&user.Status,
+		&user.MutedUntil,
+		&user.ViolationCount,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+		&user.DeletedAt,
+	)
+	return user, err
+}
+
+func scanSafeUser(scanner rowScanner) (domain.User, error) {
+	var user domain.User
+	err := scanner.Scan(
+		&user.ID,
+		&user.Email,
 		&user.DisplayName,
 		&user.Bio,
 		&user.Role,

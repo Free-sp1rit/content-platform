@@ -15,6 +15,7 @@ var (
 	ErrInvalidCredentials          = errors.New("invalid credentials")
 	ErrInvalidRefreshToken         = errors.New("invalid refresh token")
 	ErrSessionInvalid              = errors.New("session invalid")
+	ErrUserNotFound                = errors.New("user not found")
 )
 
 type ValidationField string
