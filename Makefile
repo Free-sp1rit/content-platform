@@ -22,7 +22,7 @@ test-integration:
 
 test-integration-postgres:
 	@test -n "$$(printf '%s' "$$TEST_DATABASE_URL" | tr -d '[:space:]')" || (echo "TEST_DATABASE_URL is required" >&2; exit 1)
-	go test -count=1 -tags=integration ./internal/infra/postgres/... ./internal/testkit/...
+	TEST_DATABASE_REQUIRED=1 go test -count=1 -tags=integration ./internal/infra/postgres/... ./internal/testkit/...
 
 migrate-up:
 	go run ./cmd/migrate up
