@@ -95,6 +95,54 @@ func TestDecodeJSONRejectsAnythingExceptOneKnownObject(t *testing.T) {
 	}
 }
 
+func TestDecodeJSONRejectsCaseVariantAndDuplicateObjectMembers(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "upper-case alias", body: `{"NAME":"alias"}`},
+		{name: "title-case alias", body: `{"Name":"alias"}`},
+		{name: "case-variant override", body: `{"name":"first","NAME":"second"}`},
+		{name: "exact duplicate", body: `{"name":"first","name":"second"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := decodeRequest("application/json", tt.body)
+			response := httptest.NewRecorder()
+			var dst decodeInput
+
+			assertInvalidRequest(t, DecodeJSON(response, request, &dst, 1024))
+		})
+	}
+}
+
+func TestDecodeJSONRejectsUnsupportedDestinationWithoutPanicking(t *testing.T) {
+	var typedNil *decodeInput
+	tests := []struct {
+		name        string
+		destination any
+	}{
+		{name: "map", destination: &map[string]string{}},
+		{name: "non-pointer struct", destination: decodeInput{}},
+		{name: "typed nil pointer", destination: typedNil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := decodeRequest("application/json", `{"name":"valid"}`)
+			response := httptest.NewRecorder()
+
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					t.Fatalf("DecodeJSON() panicked: %v", recovered)
+				}
+			}()
+			assertInvalidRequest(t, DecodeJSON(response, request, tt.destination, 1024))
+		})
+	}
+}
+
 func TestDecodeJSONEnforcesActualReadLimitAtExactBoundary(t *testing.T) {
 	const maxBytes = int64(64 << 10)
 	prefix := `{"name":"`

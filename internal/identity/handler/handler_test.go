@@ -228,6 +228,58 @@ func TestLoginDoesNotPrevalidateDecodedCredentials(t *testing.T) {
 	}
 }
 
+func TestBodyHandlersRejectCaseVariantJSONFieldsBeforeCallingService(t *testing.T) {
+	tests := []struct {
+		name      string
+		method    string
+		path      string
+		body      string
+		principal authn.Principal
+		pathID    string
+		handler   func(*Handler) http.HandlerFunc
+		calls     func(*fakeIdentityService) int
+	}{
+		{
+			name: "register EMAIL", method: http.MethodPost, path: "/register",
+			body:    `{"EMAIL":"user@example.com","password":"password-123","display_name":"Alice"}`,
+			handler: func(h *Handler) http.HandlerFunc { return h.Register },
+			calls:   func(fake *fakeIdentityService) int { return fake.registerCalls },
+		},
+		{
+			name: "login Password", method: http.MethodPost, path: "/login",
+			body:    `{"email":"user@example.com","Password":"password-123"}`,
+			handler: func(h *Handler) http.HandlerFunc { return h.Login },
+			calls:   func(fake *fakeIdentityService) int { return fake.loginCalls },
+		},
+		{
+			name: "update DISPLAY_NAME", method: http.MethodPut, path: "/me",
+			body: `{"DISPLAY_NAME":"Alias"}`, principal: authn.Principal{UserID: 2, SessionID: 3},
+			handler: func(h *Handler) http.HandlerFunc { return h.UpdateMe },
+			calls:   func(fake *fakeIdentityService) int { return fake.updateCalls },
+		},
+		{
+			name: "status MUTED_UNTIL", method: http.MethodPut, path: "/admin/users/8/status",
+			body: `{"status":"active","MUTED_UNTIL":null}`, principal: authn.Principal{UserID: 2, SessionID: 3}, pathID: "8",
+			handler: func(h *Handler) http.HandlerFunc { return h.ChangeStatus },
+			calls:   func(fake *fakeIdentityService) int { return fake.changeStatusCalls },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakeIdentityService{}
+			h := New(fake, nil)
+
+			response := invokeHandler(t, tt.handler(h), tt.method, tt.path, tt.body, "application/json", tt.principal, tt.pathID)
+
+			assertErrorResponse(t, response, http.StatusBadRequest, "invalid_request")
+			if calls := tt.calls(fake); calls != 0 {
+				t.Fatalf("service calls = %d", calls)
+			}
+		})
+	}
+}
+
 func TestChangeStatusClassifiesNullableAndInvalidTimes(t *testing.T) {
 	t.Run("absent nullable fields", func(t *testing.T) {
 		fake := &fakeIdentityService{changeStatusResult: sampleUserView()}
