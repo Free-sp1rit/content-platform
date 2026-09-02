@@ -1,7 +1,7 @@
 # M2 用户与认证设计
 
 日期：2026-09-01
-状态：已批准，待实现
+状态：已实现；真实 PostgreSQL/Redis 集成验收待配置环境执行
 
 ## 1. 背景
 
@@ -152,7 +152,9 @@ const (
 
 ### 6.2 状态能力矩阵
 
-| 状态 | 登录/刷新 | 读取自己 | 修改资料 | 注销 | 后续内容写操作 |
+表中的“账户注销”指 `DELETE /me`，不指 `POST /logout`：
+
+| 状态 | 登录/刷新 | 读取自己 | 修改资料 | 账户注销 | M3+ 内容写操作 |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `pending` | 允许 | 允许 | 允许 | 允许 | 默认禁止，直到激活 |
 | `active` | 允许 | 允许 | 允许 | 允许 | 允许 |
@@ -160,6 +162,8 @@ const (
 | `frozen` | 允许 | 允许 | 禁止 | 禁止 | 全部禁止 |
 | `banned` | 禁止 | 禁止 | 禁止 | 禁止 | 全部禁止 |
 | `deleted` | 禁止 | 禁止 | 禁止 | 已完成 | 全部禁止 |
+
+`POST /logout` 是认证边界特例：只要 access JWT 本身仍有效，就允许对 revoked/missing session 做幂等撤销；它不受上表账户状态能力限制。
 
 ### 6.3 字段标准化
 
@@ -290,7 +294,8 @@ const (
 
 ```json
 {
-  "logged_out": true
+  "data": {"logged_out": true},
+  "meta": {"request_id": "..."}
 }
 ```
 
@@ -547,7 +552,7 @@ Access token 是 HS256 JWT，至少包含：
 - 正常日志、错误、响应和测试失败信息不输出密码或 hash。
 - Password adapter 启动时使用正式 cost 生成 dummy hash。
 - Dummy candidate 是固定、非敏感且为 `8..72` 字节的内部值。
-- 存量 hash cost 与当前配置不一致时，adapter 执行当前配置 cost 的 dummy workload，并返回普通凭据不匹配。这是违反运维不变量时的安全失败，不是 cost 迁移或兼容机制。
+- 运行时若 `bcrypt.Cost` 成功解析出 `10..15`：cost 与配置不同时，adapter 执行当前配置 cost 的 dummy workload 后返回普通凭据不匹配；cost 相同时遵循 `CompareHashAndPassword` 结果，包括 x/crypto parser 接受的非标准 minor。范围外 cost，或被 `bcrypt.Cost`/`CompareHashAndPassword` 实际作为 malformed 拒绝的结构、salt/checksum，在 dummy workload 后返回内部错误。这些不是迁移机制。部署前 SQL 采用更严格的持久化 allowlist，只允许 `2a/2b/2y` 和精确长度/alphabet；其他 prefix/格式必须阻断部署并调查。
 
 ## 10. Auth 配置
 
@@ -574,7 +579,7 @@ AUTH_BCRYPT_COST=12
 
 `AUTH_JWT_SECRET` 必填、无默认值、至少 32 字节，不自动 trim。Access/refresh TTL 都必须至少为 1 秒且为 `time.Second` 的整数倍，refresh TTL 必须严格大于 access TTL。Auth config 的 `slog.LogValue()` 必须将 JWT secret 输出为 `[REDACTED]`。
 
-`AUTH_BCRYPT_COST` 的 `10..15` 配置校验只约束单个进程的输入，不代表已有用户后可以修改。部署前必须使用 README 中参数化的 PostgreSQL 检查确认所有现存 `password_hash` 的 cost 与目标配置一致；结果不为 `0` 时停止部署。空 `users` 表可在范围内初始化，非空表禁止通过普通部署改变该值。
+`AUTH_BCRYPT_COST` 的 `10..15` 配置校验只约束单个进程的输入，不代表已有用户后可以修改。部署前必须使用 README 中参数化的 PostgreSQL 检查确认所有现存 `password_hash` 的 cost 与目标配置一致；结果不为 `0` 时停止部署。空 `users` 表可在范围内初始化，非空表禁止通过普通部署改变该值。首次选择或空表重新选择 cost 时必须先 quiesce 所有 writer/注册入口，保持停写直到全部实例以同一 cost 完成受控切换；cost 变更不能采用 rolling deploy。
 
 Issuer 和 audience 执行 `strings.TrimSpace` 后必须非空；JWT secret 始终保留原始字节。Auth 校验在根 `Config.Validate()` 的 Redis 之后、Log 之前执行，保持稳定 fail-fast 顺序：
 
@@ -612,7 +617,7 @@ Environment -> HTTP -> Database -> Redis -> Auth -> Log
 
 ### 11.3 Logout 特例
 
-Logout 只要求 JWT 本身有效，使用条件 update 幂等撤销 session，不调用严格 session 认证。
+Logout 只要求 JWT 本身有效，使用条件 update 幂等撤销 session，不调用严格 session 认证。即使 session 已撤销、已经不存在，或对应 user 已被 banned/deleted，影响 0 行也返回成功；其他 protected API 仍必须严格校验服务端最新 session/user。
 
 ## 12. Login 固定 bcrypt 与事务
 
@@ -836,22 +841,23 @@ Action 为 `user.mute_expired`，actor type 为 system，actor ID 为 null。Det
 
 ## 17. 管理员初始化
 
-公开注册永远创建 `role=user`，不接受 role 字段。初始 admin 通过受控运维流程提升。README 使用 `psql` 变量字面量绑定，不鼓励应用隐藏接口或邮箱白名单：
+公开注册永远创建 `role=user`，不接受 role 字段。M2 没有隐藏 admin 接口或邮箱白名单。初始 admin 通过受控运维流程提升；`DATABASE_URL` 必须指向目标环境 authoritative writer，不能是只读/延迟副本、其他环境或空错库。README 使用 `psql` 的 `:'admin_email'` literal 参数化，不把 shell 值拼接进 SQL：
 
 ```bash
-psql "$DATABASE_URL" --set=admin_email='admin@example.com'
-```
-
-```sql
+: "${DATABASE_URL:?DATABASE_URL is required}"
+: "${ADMIN_EMAIL:?ADMIN_EMAIL is required}"
+psql --no-psqlrc --no-password --dbname="$DATABASE_URL" --set=ON_ERROR_STOP=1 --set=admin_email="$ADMIN_EMAIL" <<'SQL'
 UPDATE users
 SET role = 'admin',
-    updated_at = CURRENT_TIMESTAMP
+    updated_at = date_trunc('second', CURRENT_TIMESTAMP)
 WHERE email = lower(btrim(:'admin_email'))
+  AND role = 'user'
   AND status = 'active'
   AND deleted_at IS NULL;
+SQL
 ```
 
-生产环境应通过受控 migration、运维脚本或数据库管理流程执行。
+生产环境应通过受控 migration、运维脚本或数据库管理流程执行。预期结果是 `UPDATE 1`；`UPDATE 0` 必须停止并调查邮箱、角色/状态、目标环境和 writer 连接，不能当作成功。
 
 ## 18. 测试策略
 
@@ -932,6 +938,8 @@ WHERE email = lower(btrim(:'admin_email'))
 - JWT 签名失败回滚 session/hash/mute/audit；
 - Audit insert 失败回滚状态和 session 撤销。
 
+默认 `go test`、race、vet 和 build 不需要 PostgreSQL、Redis 或 Docker。`make test-integration-postgres` 只需要 `TEST_DATABASE_URL`，缺失或 Unicode blank 时通过 internal required policy 失败，避免全 Skip 假绿。直接运行 tagged tests 且不设置变量时会明确 Skip，这只证明 tagged 编译/Skip policy，不等于外部 acceptance。完整 `make test-integration` 需要 PostgreSQL 和 Redis；Redis 仅用于 readiness/checker 验收，不参与 Identity 正确性。
+
 ## 19. 依赖和配置文档
 
 M2 实际使用并固定：
@@ -944,12 +952,12 @@ github.com/go-playground/validator/v10 v10.30.3
 
 同步更新：
 
-- `go.mod` / `go.sum`；
+- `go.mod` / `go.sum` 仅在 `go mod tidy` 产生真实、审查后的漂移时修改；
 - `.env.example` 的 auth 配置；
 - README 的 auth 配置、migration、路由、运维提升 admin、单元/集成测试和 M2 范围；
 - `migrations/README.md` 的 `00002` 说明。
 
-依赖变更审查并提交后，再执行 `go mod tidy` 和 `git diff --exit-code -- go.mod go.sum` 检查无后续漂移。
+依赖变更审查并提交后，再执行 `go mod tidy` 和 `git diff --exit-code -- go.mod go.sum` 检查无后续漂移。M2 文档收口时目标依赖已固定；若 tidy 无输出，不制造依赖文件变更。
 
 ## 20. Git 和 PR 交付
 

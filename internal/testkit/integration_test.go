@@ -11,8 +11,10 @@ import (
 )
 
 const (
-	databaseURLPolicyProbeEnv    = "TESTKIT_DATABASE_URL_POLICY_PROBE"
-	databaseURLPolicyExpectedEnv = "TESTKIT_DATABASE_URL_POLICY_EXPECTED"
+	databaseURLPolicyProbeEnv     = "TESTKIT_DATABASE_URL_POLICY_PROBE"
+	databaseURLPolicyExpectedEnv  = "TESTKIT_DATABASE_URL_POLICY_EXPECTED"
+	redisAddressPolicyProbeEnv    = "TESTKIT_REDIS_ADDRESS_POLICY_PROBE"
+	redisAddressPolicyExpectedEnv = "TESTKIT_REDIS_ADDRESS_POLICY_EXPECTED"
 )
 
 func TestDatabaseURLPolicy(t *testing.T) {
@@ -126,6 +128,126 @@ func databaseURLPolicyEnvironment(databaseURL string, setURL, required bool, exp
 	}
 	if expectedValue != "" {
 		environment = append(environment, databaseURLPolicyExpectedEnv+"="+expectedValue)
+	}
+	return environment
+}
+
+func TestRedisAddressPolicy(t *testing.T) {
+	tests := []struct {
+		name          string
+		redisAddress  string
+		setAddress    bool
+		required      bool
+		wantFailure   bool
+		wantOutput    string
+		wantTestState string
+		expectedValue string
+	}{
+		{
+			name:          "default missing skips",
+			wantOutput:    "TEST_REDIS_ADDR is not set; skipping Redis integration test",
+			wantTestState: "--- SKIP: TestRedisAddressPolicyProbe",
+		},
+		{
+			name:          "default Unicode whitespace skips",
+			redisAddress:  "\u00a0",
+			setAddress:    true,
+			wantOutput:    "TEST_REDIS_ADDR is not set; skipping Redis integration test",
+			wantTestState: "--- SKIP: TestRedisAddressPolicyProbe",
+		},
+		{
+			name:          "required missing fails",
+			required:      true,
+			wantFailure:   true,
+			wantOutput:    "TEST_REDIS_ADDR is required",
+			wantTestState: "--- FAIL: TestRedisAddressPolicyProbe",
+		},
+		{
+			name:          "required Unicode whitespace fails",
+			redisAddress:  "\u00a0",
+			setAddress:    true,
+			required:      true,
+			wantFailure:   true,
+			wantOutput:    "TEST_REDIS_ADDR is required",
+			wantTestState: "--- FAIL: TestRedisAddressPolicyProbe",
+		},
+		{
+			name:          "default valid value",
+			redisAddress:  "  redis.example.test:6379  ",
+			setAddress:    true,
+			wantTestState: "--- PASS: TestRedisAddressPolicyProbe",
+			expectedValue: "redis.example.test:6379",
+		},
+		{
+			name:          "required valid value",
+			redisAddress:  "  redis.example.test:6379  ",
+			setAddress:    true,
+			required:      true,
+			wantTestState: "--- PASS: TestRedisAddressPolicyProbe",
+			expectedValue: "redis.example.test:6379",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			command := exec.Command(os.Args[0], "-test.run=^TestRedisAddressPolicyProbe$", "-test.v")
+			command.Env = redisAddressPolicyEnvironment(
+				test.redisAddress,
+				test.setAddress,
+				test.required,
+				test.expectedValue,
+			)
+			output, err := command.CombinedOutput()
+
+			var exitError *exec.ExitError
+			if err != nil && !errors.As(err, &exitError) {
+				t.Fatalf("run RedisAddress policy probe: %v", err)
+			}
+			if test.wantFailure && err == nil {
+				t.Fatalf("RedisAddress policy probe succeeded, want failure; output:\n%s", output)
+			}
+			if !test.wantFailure && err != nil {
+				t.Fatalf("RedisAddress policy probe failed with exit %d; output:\n%s", exitError.ExitCode(), output)
+			}
+			if test.wantOutput != "" && !strings.Contains(string(output), test.wantOutput) {
+				t.Fatalf("RedisAddress policy probe output = %q, want substring %q", output, test.wantOutput)
+			}
+			if !strings.Contains(string(output), test.wantTestState) {
+				t.Fatalf("RedisAddress policy probe output = %q, want test state %q", output, test.wantTestState)
+			}
+		})
+	}
+}
+
+func TestRedisAddressPolicyProbe(t *testing.T) {
+	if os.Getenv(redisAddressPolicyProbeEnv) != "1" {
+		return
+	}
+	got := RedisAddress(t)
+	if want := os.Getenv(redisAddressPolicyExpectedEnv); got != want {
+		t.Fatalf("RedisAddress() = %q, want %q", got, want)
+	}
+}
+
+func redisAddressPolicyEnvironment(redisAddress string, setAddress, required bool, expectedValue string) []string {
+	environment := make([]string, 0, len(os.Environ())+4)
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "TEST_REDIS_ADDR", testRedisRequiredEnv, redisAddressPolicyProbeEnv, redisAddressPolicyExpectedEnv:
+			continue
+		}
+		environment = append(environment, entry)
+	}
+	environment = append(environment, redisAddressPolicyProbeEnv+"=1")
+	if setAddress {
+		environment = append(environment, "TEST_REDIS_ADDR="+redisAddress)
+	}
+	if required {
+		environment = append(environment, testRedisRequiredEnv+"=1")
+	}
+	if expectedValue != "" {
+		environment = append(environment, redisAddressPolicyExpectedEnv+"="+expectedValue)
 	}
 	return environment
 }

@@ -8,7 +8,10 @@ import (
 	"testing"
 )
 
-const testDatabaseRequiredEnv = "TEST_DATABASE_REQUIRED"
+const (
+	testDatabaseRequiredEnv = "TEST_DATABASE_REQUIRED"
+	testRedisRequiredEnv    = "TEST_REDIS_REQUIRED"
+)
 
 func DatabaseURL(t testing.TB) string {
 	t.Helper()
@@ -26,6 +29,9 @@ func RedisAddress(t testing.TB) string {
 	t.Helper()
 	value := strings.TrimSpace(os.Getenv("TEST_REDIS_ADDR"))
 	if value == "" {
+		if os.Getenv(testRedisRequiredEnv) == "1" {
+			t.Fatal("TEST_REDIS_ADDR is required")
+		}
 		t.Skip("TEST_REDIS_ADDR is not set; skipping Redis integration test")
 	}
 	return value

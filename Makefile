@@ -18,7 +18,7 @@ test-race:
 test-integration:
 	@test -n "$$TEST_DATABASE_URL" || (echo "TEST_DATABASE_URL is required" >&2; exit 1)
 	@test -n "$$TEST_REDIS_ADDR" || (echo "TEST_REDIS_ADDR is required" >&2; exit 1)
-	go test -count=1 -tags=integration ./...
+	TEST_DATABASE_REQUIRED=1 TEST_REDIS_REQUIRED=1 go test -count=1 -tags=integration ./...
 
 test-integration-postgres:
 	@test -n "$$(printf '%s' "$$TEST_DATABASE_URL" | tr -d '[:space:]')" || (echo "TEST_DATABASE_URL is required" >&2; exit 1)
