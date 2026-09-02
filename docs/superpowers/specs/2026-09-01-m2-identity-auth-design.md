@@ -841,13 +841,53 @@ Action 为 `user.mute_expired`，actor type 为 system，actor ID 为 null。Det
 
 ## 17. 管理员初始化
 
-公开注册永远创建 `role=user`，不接受 role 字段。M2 没有隐藏 admin 接口或邮箱白名单。初始 admin 通过受控运维流程提升；`DATABASE_URL` 必须指向目标环境 authoritative writer，不能是只读/延迟副本、其他环境或空错库。README 使用 `psql` 的 `:'admin_email'` literal 参数化，不把 shell 值拼接进 SQL：
+公开注册永远创建 `role=user`，不接受 role 字段。M2 没有隐藏 admin 接口或邮箱白名单。初始 admin 通过受控运维流程提升，并通过 libpq service 连接目标环境 authoritative writer；不能连接只读/延迟副本、其他环境或空错库，也不能把应用使用的 password-bearing `DATABASE_URL` 导入运维 shell 或放进 `psql` argv。
+
+`PGSERVICEFILE` 只包含 host、port、dbname、user、SSL mode/root certificate 和 `target_session_attrs=read-write` 等非秘密 authoritative-writer 元数据，明确不能包含 `password` 或 `passfile`。`PGPASSFILE` 是唯一的密码来源，由 secret manager 挂载或供应，不在 shell history 中构造、不打印，且权限精确为 `0600`。两份文件必须描述同一目标，并与应用单独管理的 `DATABASE_URL` 指向同一个 authoritative writer。受控脚本检查并拒绝 shell xtrace 和列出的 password/routing override，然后设置固定 service 名称和文件路径。整个 workflow 在 subshell 中运行，退出后不会把 authoritative-writer 连接环境留在操作员 shell。README 使用 `psql` 的 `:'admin_email'` literal 参数化，不把 shell 值拼接进 SQL：
 
 ```bash
-: "${DATABASE_URL:?DATABASE_URL is required}"
+(
+case "$-" in
+  *x*) echo 'shell xtrace must be disabled before this controlled psql workflow' >&2; exit 1 ;;
+esac
+for variable in \
+  DATABASE_URL PGPASSWORD PGHOST PGHOSTADDR PGPORT PGDATABASE PGUSER \
+  PGSSLMODE PGOPTIONS PGSERVICE PGSERVICEFILE PGPASSFILE \
+  PGSSLROOTCERT PGSSLCERT PGSSLKEY PGSSLCRL PGSSLCRLDIR PGSSLSNI \
+  PGCHANNELBINDING PGREQUIREAUTH PGTARGETSESSIONATTRS PGLOADBALANCEHOSTS
+do
+  if [[ -v $variable ]]; then
+    printf 'unset %s before running this controlled psql workflow\n' "$variable" >&2
+    exit 1
+  fi
+done
+
+PGSERVICE=content-platform-authoritative-writer
+PGSERVICEFILE=/run/content-platform/postgresql/pg_service.conf
+PGPASSFILE=/run/secrets/content-platform-writer.pgpass
+export PGSERVICE PGSERVICEFILE PGPASSFILE
+
+[[ -f "$PGSERVICEFILE" && -r "$PGSERVICEFILE" ]] || {
+  echo 'controlled PGSERVICEFILE must be a readable regular file' >&2
+  exit 1
+}
+[[ -f "$PGPASSFILE" && -r "$PGPASSFILE" ]] || {
+  echo 'secret-manager PGPASSFILE must be a readable regular file' >&2
+  exit 1
+}
+pgpass_mode="$(stat -Lc '%a' -- "$PGPASSFILE")" || {
+  echo 'cannot inspect PGPASSFILE mode' >&2
+  exit 1
+}
+[[ "$pgpass_mode" == 600 ]] || {
+  echo 'PGPASSFILE must have mode 0600' >&2
+  exit 1
+}
+
 : "${ADMIN_EMAIL:?ADMIN_EMAIL is required}"
-psql --no-psqlrc --no-password --dbname="$DATABASE_URL" --set=ON_ERROR_STOP=1 --set=admin_email="$ADMIN_EMAIL" <<'SQL'
-UPDATE users
+psql --no-psqlrc --no-password \
+  --set=ON_ERROR_STOP=1 --set=admin_email="$ADMIN_EMAIL" <<'SQL'
+UPDATE public.users
 SET role = 'admin',
     updated_at = date_trunc('second', CURRENT_TIMESTAMP)
 WHERE email = lower(btrim(:'admin_email'))
@@ -855,9 +895,10 @@ WHERE email = lower(btrim(:'admin_email'))
   AND status = 'active'
   AND deleted_at IS NULL;
 SQL
+)
 ```
 
-生产环境应通过受控 migration、运维脚本或数据库管理流程执行。预期结果是 `UPDATE 1`；`UPDATE 0` 必须停止并调查邮箱、角色/状态、目标环境和 writer 连接，不能当作成功。
+生产环境应通过受控 migration、运维脚本或数据库管理流程执行。只有 command tag `UPDATE 1` 算成功；shell/`psql` 退出码为 0 本身不够。`UPDATE 0` 必须停止并调查邮箱、角色/状态、目标环境和 writer 连接，不能当作成功；大于 1 同样必须停止并调查数据库完整性。
 
 ## 18. 测试策略
 

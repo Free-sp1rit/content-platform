@@ -107,23 +107,75 @@ set +a
 
 ### bcrypt 部署前阻断检查
 
-每次部署、扩缩容或回滚前，先把 `DATABASE_URL` 指向目标环境的 authoritative writer，并导入本次部署的 `AUTH_BCRYPT_COST`。该 URL 不能指向只读副本、延迟副本、其他环境，或一个意外为空/错误的数据库；否则“0 条不兼容”不能证明将要服务的真实用户数据兼容。
+每次部署、扩缩容或回滚前，都必须通过受控 libpq service 连接目标环境的 authoritative writer，并导入本次部署的 `AUTH_BCRYPT_COST`。不要把应用使用的、可能携带密码的 `DATABASE_URL` 导入运维 shell 或放进 `psql` argv。`PGSERVICEFILE` 只能包含 host、port、dbname、user、SSL mode/root certificate 和 writable-session selection 等非秘密 authoritative-writer 元数据，明确不能包含 `password` 或 `passfile`；`PGPASSFILE` 必须由 secret manager 挂载或供应，不能在 shell history 中构造、不能打印，且权限必须精确为 `0600`。两份文件必须描述同一目标，并与应用单独管理的 `DATABASE_URL` 指向同一个 authoritative writer；只读/延迟副本、其他环境或空错库上的“0 条不兼容”不能证明真实用户数据兼容。
+
+例如，由配置管理部署的 `/run/content-platform/postgresql/pg_service.conf` 只包含以下类型的非秘密数据，不包含 `password`：
+
+```ini
+[content-platform-authoritative-writer]
+host=writer.example.internal
+port=5432
+dbname=content_platform
+user=content_platform_writer
+sslmode=verify-full
+sslrootcert=/run/content-platform/postgresql/authoritative-writer-ca.pem
+target_session_attrs=read-write
+```
+
+secret manager 供应的 `PGPASSFILE` 条目必须匹配这里的 host、port、dbname 和 user；文档、命令输出与 shell history 均不得展示或构造其 password 字段。下面的整个 workflow 在 subshell 中运行，退出后不会把 authoritative-writer 连接环境留在操作员 shell。
 
 以下 Bash 脚本只输出 `incompatible_password_hashes` 计数，不读取或输出原始 hash。它会把 NULL、未知/非法 bcrypt prefix 或 version、非 60-byte hash、位置 7 不是 `$`、后 53 字符不属于 bcrypt Base64 alphabet，以及 cost 不一致全部计为不兼容；`2a`、`2b`、`2y` 是唯一允许的版本，`2x` 和其他版本都会被拒绝。任何 SQL/psql 失败、非数字输出或非零计数都阻止部署：
 
 ```bash
-: "${DATABASE_URL:?DATABASE_URL is required}"
+(
+case "$-" in
+  *x*) echo 'shell xtrace must be disabled before this controlled psql workflow' >&2; exit 1 ;;
+esac
+for variable in \
+  DATABASE_URL PGPASSWORD PGHOST PGHOSTADDR PGPORT PGDATABASE PGUSER \
+  PGSSLMODE PGOPTIONS PGSERVICE PGSERVICEFILE PGPASSFILE \
+  PGSSLROOTCERT PGSSLCERT PGSSLKEY PGSSLCRL PGSSLCRLDIR PGSSLSNI \
+  PGCHANNELBINDING PGREQUIREAUTH PGTARGETSESSIONATTRS PGLOADBALANCEHOSTS
+do
+  if [[ -v $variable ]]; then
+    printf 'unset %s before running this controlled psql workflow\n' "$variable" >&2
+    exit 1
+  fi
+done
+
+PGSERVICE=content-platform-authoritative-writer
+PGSERVICEFILE=/run/content-platform/postgresql/pg_service.conf
+PGPASSFILE=/run/secrets/content-platform-writer.pgpass
+export PGSERVICE PGSERVICEFILE PGPASSFILE
+
+[[ -f "$PGSERVICEFILE" && -r "$PGSERVICEFILE" ]] || {
+  echo 'controlled PGSERVICEFILE must be a readable regular file' >&2
+  exit 1
+}
+[[ -f "$PGPASSFILE" && -r "$PGPASSFILE" ]] || {
+  echo 'secret-manager PGPASSFILE must be a readable regular file' >&2
+  exit 1
+}
+pgpass_mode="$(stat -Lc '%a' -- "$PGPASSFILE")" || {
+  echo 'cannot inspect PGPASSFILE mode' >&2
+  exit 1
+}
+[[ "$pgpass_mode" == 600 ]] || {
+  echo 'PGPASSFILE must have mode 0600' >&2
+  exit 1
+}
+
 : "${AUTH_BCRYPT_COST:?AUTH_BCRYPT_COST is required}"
 case "$AUTH_BCRYPT_COST" in
   10|11|12|13|14|15) ;;
   *) echo 'AUTH_BCRYPT_COST must be between 10 and 15' >&2; exit 1 ;;
 esac
 incompatible_password_hashes="$(
-  psql --no-psqlrc --no-password --dbname="$DATABASE_URL" \
+  psql --no-psqlrc --no-password \
     --set=ON_ERROR_STOP=1 --set=bcrypt_cost="$AUTH_BCRYPT_COST" \
     --quiet --tuples-only --no-align <<'SQL'
 SELECT count(*) AS incompatible_password_hashes
-FROM users
+FROM public.users
 WHERE octet_length(password_hash) IS DISTINCT FROM 60
    OR (left(password_hash, 4) IN ('$2a$', '$2b$', '$2y$')) IS DISTINCT FROM TRUE
    OR substring(password_hash FROM 7 FOR 1) IS DISTINCT FROM '$'
@@ -141,6 +193,7 @@ if [ "$incompatible_password_hashes" -ne 0 ]; then
   echo 'deployment blocked: incompatible_password_hashes must be 0' >&2
   exit 1
 fi
+)
 ```
 
 空 `users` 表的计数为 `0`，此时可以在允许范围内完成首次初始化；非空表只能继续使用所有现存密码 hash 已采用的同一 cost。
@@ -296,14 +349,51 @@ users（ID 升序） -> user_sessions（ID 升序） -> audit_logs（只 insert�
 
 公开注册只会创建 `role=user`，请求中的隐藏/额外 `role` 字段会被严格 JSON 边界拒绝。M2 不提供隐藏 admin API、邮箱白名单或可由客户端触发的角色提升。
 
-初始 admin 必须通过受控运维流程提升已经注册且处于 active 状态的用户。先确认 `DATABASE_URL` 指向目标环境 authoritative writer；不能使用只读/延迟副本、其他环境或空错库。以下命令通过 psql literal `:'admin_email'` 参数化邮箱，不把 shell 值拼接进 SQL：
+初始 admin 必须通过受控运维流程提升已经注册且处于 active 状态的用户。连接使用与上一节相同的 libpq service 模型：`PGSERVICEFILE` 只保存非秘密 authoritative-writer 元数据，不能包含 `password` 或 `passfile`；secret manager 供应且以精确 `0600` 权限挂载唯一的 `PGPASSFILE`，两者必须匹配同一目标，并与应用单独管理的 `DATABASE_URL` 指向同一个 authoritative writer。不要把该 password-bearing URL 导入运维 shell 或放进进程 argv，也不能使用只读/延迟副本、其他环境或空错库。以下命令通过 psql literal `:'admin_email'` 参数化邮箱，不把 shell 值拼接进 SQL。整个 workflow 在 subshell 中运行，退出后不会把 authoritative-writer 连接环境留在操作员 shell：
 
 ```bash
-: "${DATABASE_URL:?DATABASE_URL is required}"
+(
+case "$-" in
+  *x*) echo 'shell xtrace must be disabled before this controlled psql workflow' >&2; exit 1 ;;
+esac
+for variable in \
+  DATABASE_URL PGPASSWORD PGHOST PGHOSTADDR PGPORT PGDATABASE PGUSER \
+  PGSSLMODE PGOPTIONS PGSERVICE PGSERVICEFILE PGPASSFILE \
+  PGSSLROOTCERT PGSSLCERT PGSSLKEY PGSSLCRL PGSSLCRLDIR PGSSLSNI \
+  PGCHANNELBINDING PGREQUIREAUTH PGTARGETSESSIONATTRS PGLOADBALANCEHOSTS
+do
+  if [[ -v $variable ]]; then
+    printf 'unset %s before running this controlled psql workflow\n' "$variable" >&2
+    exit 1
+  fi
+done
+
+PGSERVICE=content-platform-authoritative-writer
+PGSERVICEFILE=/run/content-platform/postgresql/pg_service.conf
+PGPASSFILE=/run/secrets/content-platform-writer.pgpass
+export PGSERVICE PGSERVICEFILE PGPASSFILE
+
+[[ -f "$PGSERVICEFILE" && -r "$PGSERVICEFILE" ]] || {
+  echo 'controlled PGSERVICEFILE must be a readable regular file' >&2
+  exit 1
+}
+[[ -f "$PGPASSFILE" && -r "$PGPASSFILE" ]] || {
+  echo 'secret-manager PGPASSFILE must be a readable regular file' >&2
+  exit 1
+}
+pgpass_mode="$(stat -Lc '%a' -- "$PGPASSFILE")" || {
+  echo 'cannot inspect PGPASSFILE mode' >&2
+  exit 1
+}
+[[ "$pgpass_mode" == 600 ]] || {
+  echo 'PGPASSFILE must have mode 0600' >&2
+  exit 1
+}
+
 : "${ADMIN_EMAIL:?ADMIN_EMAIL is required}"
-psql --no-psqlrc --no-password --dbname="$DATABASE_URL" \
+psql --no-psqlrc --no-password \
   --set=ON_ERROR_STOP=1 --set=admin_email="$ADMIN_EMAIL" <<'SQL'
-UPDATE users
+UPDATE public.users
 SET role = 'admin',
     updated_at = date_trunc('second', CURRENT_TIMESTAMP)
 WHERE email = lower(btrim(:'admin_email'))
@@ -311,9 +401,10 @@ WHERE email = lower(btrim(:'admin_email'))
   AND status = 'active'
   AND deleted_at IS NULL;
 SQL
+)
 ```
 
-受控执行的预期结果是 `UPDATE 1`。若输出 `UPDATE 0`，必须停止并调查邮箱归一化、用户状态/角色、目标环境和 writer 连接；不得把它当作成功，也不得绕过检查临时增加隐藏接口或白名单。任何大于 1 的结果同样必须停止并调查数据库完整性。
+只有 `psql` 输出的 command tag 为 `UPDATE 1` 才算提升成功；shell/`psql` 退出码为 0 本身不构成成功。若输出 `UPDATE 0`，必须停止并调查邮箱归一化、用户状态/角色、目标环境和 writer 连接；不得把它当作成功，也不得绕过检查临时增加隐藏接口或白名单。任何大于 1 的结果同样必须停止并调查数据库完整性。
 
 ## 健康检查
 
@@ -368,7 +459,7 @@ go vet ./...
 go build ./...
 ```
 
-Makefile 等价入口：
+Makefile 提供日常便捷入口；这些默认 target 可能复用 Go test cache，不能替代上面的显式 fresh release gate：
 
 ```bash
 make test

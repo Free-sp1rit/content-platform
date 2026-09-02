@@ -28,6 +28,6 @@ Goose v3.27.1 rejects an empty migration directory before it creates its version
 
 The `user_sessions.token_hash` column is a 32-byte value. M2 stores only SHA-256 of the raw 32-byte refresh secret in that column; it never stores the external `sid.secret` refresh token or its Base64URL secret text. A session's `expires_at` is fixed at login and is an absolute expiration: rotating the refresh secret updates only `token_hash`, not `expires_at`.
 
-The audit service records actions such as `user.status_changed` and `user.mute_expired`. The schema intentionally does not restrict `action` to only those values. Status changes, required session revocation, and audit insertion are coordinated by the Identity service in one transaction; an audit insertion failure rolls the transaction back.
+The Identity service records audit actions such as `user.status_changed` and `user.mute_expired`. The schema intentionally does not restrict `action` to only those values. Status changes, required session revocation, and audit insertion are coordinated by the Identity service in one transaction; an audit insertion failure rolls the transaction back.
 
 The `00002_identity.sql` Down section drops `audit_logs`, `user_sessions`, and `users`. It therefore deletes every M2 Identity user, password hash, session, and audit record. This is destructive data loss, not an application rollback strategy; do not run it against a shared or production environment without an explicit, reviewed recovery plan.
